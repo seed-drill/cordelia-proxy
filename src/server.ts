@@ -193,13 +193,24 @@ class CordeliaServer {
     operation: 'patch' | 'replace',
     data: Record<string, unknown>,
     expectedUpdatedAt?: string
-  ): Promise<{ success: true; updated_at: string } | { error: string; current_updated_at?: string }> {
+  ): Promise<{ success: true; updated_at: string } | { error: string; current_updated_at?: string; detail?: string; known_users?: string[] }> {
     // Load current context fresh from disk (bypass cache for writes)
     // Skip validation to allow fixing invalid data via replace operation
     const current = await this.loadHotContext(userId, true, true);
 
     if (!current) {
-      return { error: 'not_found' };
+      let knownUsers: string[] = [];
+      try {
+        const storage = getStorageProvider();
+        knownUsers = await storage.listL1Users();
+      } catch {
+        // Storage not ready
+      }
+      return {
+        error: 'user_not_found',
+        detail: `No L1 context for "${userId}". Known users: [${knownUsers.join(', ')}]`,
+        known_users: knownUsers,
+      };
     }
 
     // Optimistic concurrency check
@@ -652,11 +663,25 @@ class CordeliaServer {
           const context = await this.loadHotContext(userId);
 
           if (!context) {
+            // Provide helpful error with known users
+            let knownUsers: string[] = [];
+            try {
+              const storage = getStorageProvider();
+              knownUsers = await storage.listL1Users();
+            } catch {
+              // Storage not ready
+            }
+
+            const detail = knownUsers.length > 0
+              ? `No L1 context found for "${userId}". Known users: [${knownUsers.join(', ')}]. ` +
+                `Check that you're using the L1 storage key (filename), not the identity.id field.`
+              : `No L1 context found for "${userId}". No users found in storage.`;
+
             return {
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify({ error: 'not_found', user_id: userId }),
+                  text: JSON.stringify({ error: 'user_not_found', user_id: userId, detail, known_users: knownUsers }),
                 },
               ],
             };

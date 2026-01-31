@@ -16,7 +16,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // --- Constants ---
 
 export const CORDELIA_DIR = path.resolve(__dirname, '..');
-export const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT || path.join(CORDELIA_DIR, 'memory');
+function getConfigPath() {
+  return path.join(os.homedir(), '.cordelia', 'config.toml');
+}
 const KEY_LENGTH = 32;
 const AES_ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
@@ -135,7 +137,8 @@ export function computeChainHash(previousHash, sessionCount, contentHash) {
  * Load salt for key derivation.
  */
 export async function loadSalt() {
-  const saltPath = path.join(MEMORY_ROOT, 'L2-warm', '.salt', 'global.salt');
+  const memRoot = await getMemoryRoot();
+  const saltPath = path.join(memRoot, 'L2-warm', '.salt', 'global.salt');
   return fs.readFile(saltPath);
 }
 
@@ -144,7 +147,7 @@ export async function loadSalt() {
  * If decryption fails, attempts recovery via the provided recoveryFn.
  */
 export async function readL1(userId, key, recoveryFn) {
-  const l1Path = getL1Path(userId);
+  const l1Path = await getL1Path(userId);
   let content = await fs.readFile(l1Path, 'utf-8');
   let parsed = JSON.parse(content);
 
@@ -173,7 +176,7 @@ export async function readL1(userId, key, recoveryFn) {
  * Encrypt and write L1 data to disk.
  */
 export async function writeL1(userId, l1Data, key) {
-  const l1Path = getL1Path(userId);
+  const l1Path = await getL1Path(userId);
   const encrypted = await encrypt(key, l1Data);
   await fs.writeFile(l1Path, JSON.stringify(encrypted, null, 2));
 }
@@ -181,8 +184,9 @@ export async function writeL1(userId, l1Data, key) {
 /**
  * Get the file path for a user's L1 data.
  */
-export function getL1Path(userId) {
-  return path.join(MEMORY_ROOT, 'L1-hot', `${userId}.json`);
+export async function getL1Path(userId) {
+  const memRoot = await getMemoryRoot();
+  return path.join(memRoot, 'L1-hot', `${userId}.json`);
 }
 
 /**
@@ -192,4 +196,135 @@ export async function initCrypto(passphrase) {
   const salt = await loadSalt();
   const key = await deriveKey(passphrase, salt);
   return key;
+}
+
+// --- Config (config.toml) ---
+
+/**
+ * Minimal TOML parser for flat key-value pairs with [section] headers.
+ * Handles: strings (quoted and unquoted), sections, comments, blank lines.
+ * Does NOT handle: arrays, inline tables, multiline strings, nested tables.
+ */
+export function parseTOML(text) {
+  const result = {};
+  let currentSection = null;
+
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim();
+
+    // Skip blank lines and comments
+    if (!line || line.startsWith('#')) continue;
+
+    // Section header
+    const sectionMatch = line.match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) {
+      currentSection = sectionMatch[1].trim();
+      if (!result[currentSection]) result[currentSection] = {};
+      continue;
+    }
+
+    // Key = value
+    const kvMatch = line.match(/^([^=]+?)\s*=\s*(.+)$/);
+    if (kvMatch) {
+      const key = kvMatch[1].trim();
+      let value = kvMatch[2].trim();
+
+      // Handle quoted strings (extract content between quotes, ignore inline comments)
+      const dqMatch = value.match(/^"([^"]*)"/)
+      const sqMatch = value.match(/^'([^']*)'/)
+      if (dqMatch) {
+        value = dqMatch[1];
+      } else if (sqMatch) {
+        value = sqMatch[1];
+      } else {
+        // Unquoted: strip inline comments
+        const commentIdx = value.indexOf('#');
+        if (commentIdx > 0) {
+          value = value.slice(0, commentIdx).trim();
+        }
+      }
+
+      if (currentSection) {
+        result[currentSection][key] = value;
+      } else {
+        result[key] = value;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Load config from ~/.cordelia/config.toml.
+ * Returns parsed config object or null if file doesn't exist.
+ */
+let _configCache = null;
+export async function loadConfig() {
+  if (_configCache !== undefined && _configCache !== null) return _configCache;
+
+  try {
+    const content = await fs.readFile(getConfigPath(), 'utf-8');
+    _configCache = parseTOML(content);
+    return _configCache;
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      _configCache = null;
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Clear cached config (for testing).
+ */
+export function clearConfigCache() {
+  _configCache = null;
+}
+
+/**
+ * Get user_id from (in order): CLI arg, config.toml, or throw.
+ * No silent fallback.
+ */
+export async function getUserId() {
+  // 1. CLI arg (highest priority)
+  if (process.argv[2]) return process.argv[2];
+
+  // 2. config.toml
+  const config = await loadConfig();
+  if (config?.identity?.user_id) return config.identity.user_id;
+
+  // 3. Fail with clear error
+  throw new Error(
+    'No user_id configured. Either:\n' +
+    '  1. Pass user_id as CLI argument: ./session-start.mjs <user_id>\n' +
+    '  2. Set identity.user_id in ~/.cordelia/config.toml\n' +
+    '  3. Run install.sh to generate config'
+  );
+}
+
+/**
+ * Get memory root from (in order): env var, config.toml, or throw.
+ * No silent fallback.
+ */
+export async function getMemoryRoot() {
+  // 1. Environment variable (highest priority)
+  if (process.env.CORDELIA_MEMORY_ROOT) return process.env.CORDELIA_MEMORY_ROOT;
+
+  // 2. config.toml
+  const config = await loadConfig();
+  if (config?.paths?.memory_root) {
+    // Expand ~ to homedir
+    const raw = config.paths.memory_root;
+    return raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw;
+  }
+
+  // 3. Fail with clear error
+  throw new Error(
+    'No memory root configured. Either:\n' +
+    '  1. Set CORDELIA_MEMORY_ROOT environment variable\n' +
+    '  2. Set paths.memory_root in ~/.cordelia/config.toml\n' +
+    '  3. Run install.sh to generate config'
+  );
 }

@@ -15,7 +15,7 @@
 import * as fs from 'fs/promises';
 import {
   getEncryptionKey, initCrypto, readL1, writeL1,
-  computeContentHash, computeChainHash,
+  computeContentHash, computeChainHash, getUserId,
 } from './lib.mjs';
 import { analyzeMessages } from './novelty-lite.mjs';
 import { notify } from './recovery.mjs';
@@ -128,7 +128,13 @@ function applyToL1(l1Data, suggestions) {
 }
 
 async function main() {
-  const userId = process.argv[2] || 'russell';
+  let userId;
+  try {
+    userId = await getUserId();
+  } catch (err) {
+    console.error(`[Cordelia PreCompact] ${err.message}`);
+    process.exit(0); // Never block compaction
+  }
 
   try {
     // Read transcript path from stdin

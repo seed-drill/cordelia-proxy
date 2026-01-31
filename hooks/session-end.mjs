@@ -17,7 +17,7 @@ import * as crypto from 'crypto';
 import { execSync } from 'child_process';
 import {
   getEncryptionKey, initCrypto, readL1, writeL1, getL1Path,
-  computeContentHash, computeChainHash, CORDELIA_DIR,
+  computeContentHash, computeChainHash, CORDELIA_DIR, getUserId,
 } from './lib.mjs';
 import { attemptRecovery, createBackup, removeBackup, notify } from './recovery.mjs';
 
@@ -87,7 +87,14 @@ async function gitCommit() {
 }
 
 async function main() {
-  const userId = process.argv[2] || 'russell';
+  let userId;
+  try {
+    userId = await getUserId();
+  } catch (err) {
+    console.error(`[Cordelia] ${err.message}`);
+    process.exit(1);
+  }
+
   const passphrase = await getEncryptionKey();
 
   if (!passphrase) {
@@ -97,7 +104,7 @@ async function main() {
 
   try {
     const key = await initCrypto(passphrase);
-    const l1Path = getL1Path(userId);
+    const l1Path = await getL1Path(userId);
 
     // Create backup before any modifications
     await createBackup(l1Path);
@@ -184,7 +191,7 @@ async function main() {
 
   } catch (error) {
     // Unexpected error - try to restore backup
-    const l1Path = getL1Path(userId);
+    const l1Path = await getL1Path(userId);
     const backupPath = `${l1Path}.backup`;
     try {
       const { default: fs } = await import('fs/promises');

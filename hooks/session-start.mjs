@@ -13,7 +13,7 @@
  */
 import {
   getEncryptionKey, initCrypto, readL1, writeL1,
-  computeContentHash, computeChainHash, CORDELIA_DIR,
+  computeContentHash, computeChainHash, CORDELIA_DIR, getUserId,
 } from './lib.mjs';
 import { attemptRecovery, notify } from './recovery.mjs';
 
@@ -107,7 +107,14 @@ function verifyIntegrity(l1Data) {
 }
 
 async function main() {
-  const userId = process.argv[2] || 'russell';
+  let userId;
+  try {
+    userId = await getUserId();
+  } catch (err) {
+    console.error(`[Cordelia] ${err.message}`);
+    process.exit(1);
+  }
+
   const passphrase = await getEncryptionKey();
 
   if (!passphrase) {
