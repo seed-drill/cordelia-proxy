@@ -46,7 +46,7 @@ primary_region = 'lhr'
 [env]
   CORDELIA_MEMORY_ROOT = '/data/memory'
   CORDELIA_STORAGE = 'sqlite'
-  CORDELIA_CORE_API = 'http://core.process.cordelia-proxy.internal:9473'
+  CORDELIA_CORE_API = 'http://cordelia-proxy.internal:9473'
 
 [[vm]]
   memory = '512mb'
