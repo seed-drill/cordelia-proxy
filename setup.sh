@@ -186,7 +186,7 @@ if [ ! -f "$L1_FILE" ] || [ ! -s "$L1_FILE" ]; then
     "id": "${USER_ID}",
     "name": "${USER_NAME}",
     "roles": [],
-    "orgs": [{"id": "seed_drill", "name": "Seed Drill", "role": "team"}],
+    "orgs": [],
     "key_refs": [],
     "style": [],
     "tz": "Europe/London"

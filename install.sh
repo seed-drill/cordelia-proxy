@@ -99,9 +99,16 @@ if ! command -v node &> /dev/null; then
     warn "Node.js not found. Installing..."
     if [ "$OS" = "macos" ]; then
         if ! command -v brew &> /dev/null; then
-            warn "Homebrew not found. Installing..."
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            info "Homebrew installed"
+            warn "Homebrew not found. Required for installing Node.js on macOS."
+            echo ""
+            read -p "Install Homebrew now? [y/N] " -n 1 -r
+            echo ""
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                info "Homebrew installed"
+            else
+                error "Homebrew is required. Install manually from https://brew.sh or install Node.js another way."
+            fi
         fi
         brew install node
     elif [ "$OS" = "linux" ]; then
@@ -223,7 +230,7 @@ if [ ! -f "$L1_FILE" ] || [ ! -s "$L1_FILE" ]; then
     "id": "${USER_ID}",
     "name": "${USER_NAME}",
     "roles": [],
-    "orgs": [{"id": "seed_drill", "name": "Seed Drill", "role": "team"}],
+    "orgs": [],
     "key_refs": [],
     "style": [],
     "tz": "Europe/London"
@@ -257,6 +264,44 @@ EOF
     info "Created L1 context: $USER_ID.json"
 else
     info "L1 context already exists for $USER_ID"
+fi
+
+# Generate default node config with bootnodes (if cordelia-node is installed)
+NODE_CONFIG_DIR="$HOME/.cordelia"
+NODE_CONFIG="$NODE_CONFIG_DIR/config.toml"
+mkdir -p "$NODE_CONFIG_DIR"
+if [ ! -f "$NODE_CONFIG" ]; then
+    cat > "$NODE_CONFIG" << NODEEOF
+[node]
+identity_key = "~/.cordelia/node.key"
+api_transport = "http"
+api_addr = "127.0.0.1:9473"
+database = "~/.cordelia/cordelia.db"
+entity_id = "${USER_ID}"
+
+[network]
+listen_addr = "0.0.0.0:9474"
+
+[[network.bootnodes]]
+addr = "boot1.cordelia.seeddrill.io:9474"
+
+[[network.bootnodes]]
+addr = "boot2.cordelia.seeddrill.io:9474"
+
+[governor]
+hot_min = 2
+hot_max = 20
+warm_min = 10
+warm_max = 50
+
+[replication]
+sync_interval_moderate_secs = 300
+tombstone_retention_days = 7
+max_batch_size = 100
+NODEEOF
+    info "Generated node config with bootnodes: $NODE_CONFIG"
+else
+    info "Node config already exists: $NODE_CONFIG"
 fi
 
 # Ensure salt directory and file exist
