@@ -97,8 +97,10 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      # Full test suite
+      # Full test suite (continue so e2e always runs)
       - name: Unit + integration tests
+        id: tests
+        continue-on-error: true
         run: npm test
 
       # End-to-end install.sh test in clean container
@@ -106,3 +108,15 @@ jobs:
         run: |
           docker build -t cordelia-install-test -f Dockerfile.test .
           docker run --rm cordelia-install-test
+
+      # Clean up docker images
+      - name: Docker cleanup
+        if: always()
+        run: docker image rm cordelia-install-test 2>/dev/null || true
+
+      # Fail the job if tests failed
+      - name: Check test results
+        if: steps.tests.outcome == 'failure'
+        run: |
+          echo "Unit/integration tests failed - see above for details"
+          exit 1

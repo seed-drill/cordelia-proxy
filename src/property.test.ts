@@ -40,21 +40,14 @@ describe('Property: Crypto encrypt/decrypt round-trip', () => {
   });
 
   it('should produce different ciphertexts for same plaintext (unique IVs)', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.uint8Array({ minLength: 1, maxLength: 100 }),
-        async (arr) => {
-          const plaintext = Buffer.from(arr);
-          const enc1 = await provider.encrypt(plaintext);
-          const enc2 = await provider.encrypt(plaintext);
-          // IVs must differ
-          assert.notStrictEqual(enc1.iv, enc2.iv);
-          // Ciphertexts must differ (because IVs differ)
-          assert.notStrictEqual(enc1.ciphertext, enc2.ciphertext);
-        },
-      ),
-      { numRuns: 20 },
-    );
+    // Run sequentially (not via fast-check) to avoid framework replay interference
+    for (let i = 0; i < 20; i++) {
+      const plaintext = crypto.randomBytes(1 + (i % 100));
+      const enc1 = await provider.encrypt(plaintext);
+      const enc2 = await provider.encrypt(plaintext);
+      assert.notStrictEqual(enc1.iv, enc2.iv, `IVs must be unique (iteration ${i})`);
+      assert.notStrictEqual(enc1.ciphertext, enc2.ciphertext, `Ciphertexts must differ (iteration ${i})`);
+    }
   });
 
   it('should not decrypt with wrong key', async () => {
