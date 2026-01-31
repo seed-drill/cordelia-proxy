@@ -109,10 +109,18 @@ jobs:
           docker build -t cordelia-install-test -f Dockerfile.test .
           docker run --rm cordelia-install-test
 
+      # MCP protocol round-trip test
+      - name: MCP e2e test
+        run: |
+          docker build -t cordelia-mcp-e2e -f Dockerfile.e2e .
+          docker run --rm cordelia-mcp-e2e
+
       # Clean up docker images
       - name: Docker cleanup
         if: always()
-        run: docker image rm cordelia-install-test 2>/dev/null || true
+        run: |
+          docker image rm cordelia-install-test 2>/dev/null || true
+          docker image rm cordelia-mcp-e2e 2>/dev/null || true
 
       # Fail the job if tests failed
       - name: Check test results

@@ -1,0 +1,38 @@
+# Cordelia MCP E2E test
+#
+# Full round-trip: install.sh in clean Ubuntu 24.04, start MCP server,
+# send JSON-RPC tool calls, validate memory read/write/search.
+#
+# Build:  docker build -t cordelia-mcp-e2e -f Dockerfile.e2e .
+# Run:    docker run --rm cordelia-mcp-e2e
+
+FROM ubuntu:24.04
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+      curl ca-certificates git build-essential python3 && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Simulate Claude Code being available (install.sh checks for it)
+RUN echo '#!/bin/sh' > /usr/local/bin/claude && \
+    echo 'echo "claude mock"' >> /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude
+
+# Copy the project
+COPY . /opt/cordelia-proxy
+WORKDIR /opt/cordelia-proxy
+
+# Create a test user and give ownership of the project dir
+RUN useradd -m -s /bin/bash testuser && \
+    chown -R testuser:testuser /opt/cordelia-proxy
+
+# Run install.sh as testuser (builds, generates key, creates L1 context)
+USER testuser
+ENV HOME=/home/testuser
+
+RUN ./install.sh testuser --no-embeddings
+
+# Test runs at docker-run time for cleaner CI output
+CMD ["node", "scripts/test-e2e-mcp.mjs"]
