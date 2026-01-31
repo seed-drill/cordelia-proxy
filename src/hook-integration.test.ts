@@ -15,24 +15,17 @@ import assert from 'node:assert';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { execSync, execFileSync } from 'child_process';
+import { execFileSync } from 'child_process';
 
 // Path to the hooks
 const HOOKS_DIR = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'hooks');
 
 describe('Hook Integration: config.toml identity', () => {
   let tmpDir: string;
-  let configDir: string;
-  let configPath: string;
   let memoryRoot: string;
-  let savedHome: string;
-
   before(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cordelia-hook-test-'));
-    configDir = path.join(tmpDir, '.cordelia');
-    configPath = path.join(configDir, 'config.toml');
     memoryRoot = path.join(tmpDir, 'memory');
-    savedHome = os.homedir();
 
     // Create memory structure
     await fs.mkdir(path.join(memoryRoot, 'L1-hot'), { recursive: true });
@@ -50,7 +43,7 @@ describe('Hook Integration: config.toml identity', () => {
   describe('parseTOML', () => {
     it('should parse flat config with sections', async () => {
       // Import the parser directly
-      // @ts-ignore - hooks are plain JS
+      // @ts-expect-error - hooks are plain JS, no type declarations
       const { parseTOML } = await import('../hooks/lib.mjs') as any;
 
       const toml = `
@@ -71,7 +64,7 @@ entity_id = "test_entity"
     });
 
     it('should handle single-quoted values', async () => {
-      // @ts-ignore - hooks are plain JS
+      // @ts-expect-error - hooks are plain JS, no type declarations
       const { parseTOML } = await import('../hooks/lib.mjs') as any;
 
       const toml = `[identity]\nuser_id = 'testuser'`;
@@ -80,7 +73,7 @@ entity_id = "test_entity"
     });
 
     it('should handle unquoted values', async () => {
-      // @ts-ignore - hooks are plain JS
+      // @ts-expect-error - hooks are plain JS, no type declarations
       const { parseTOML } = await import('../hooks/lib.mjs') as any;
 
       const toml = `[identity]\nuser_id = testuser`;
@@ -89,7 +82,7 @@ entity_id = "test_entity"
     });
 
     it('should skip comments and blank lines', async () => {
-      // @ts-ignore - hooks are plain JS
+      // @ts-expect-error - hooks are plain JS, no type declarations
       const { parseTOML } = await import('../hooks/lib.mjs') as any;
 
       const toml = `
@@ -106,7 +99,7 @@ user_id = "test"
 
   describe('getUserId resolution', () => {
     it('should prefer CLI arg over config.toml', async () => {
-      // @ts-ignore - hooks are plain JS
+      // @ts-expect-error - hooks are plain JS, no type declarations
       const { getUserId, clearConfigCache } = await import('../hooks/lib.mjs') as any;
       clearConfigCache();
 
@@ -123,7 +116,7 @@ user_id = "test"
     });
 
     it('should fail with clear error when no config and no CLI arg', async () => {
-      // @ts-ignore - hooks are plain JS
+      // @ts-expect-error - hooks are plain JS, no type declarations
       const { getUserId, clearConfigCache } = await import('../hooks/lib.mjs') as any;
       clearConfigCache();
 
@@ -151,7 +144,7 @@ user_id = "test"
 
   describe('getMemoryRoot resolution', () => {
     it('should prefer CORDELIA_MEMORY_ROOT env var', async () => {
-      // @ts-ignore - hooks are plain JS
+      // @ts-expect-error - hooks are plain JS, no type declarations
       const { getMemoryRoot, clearConfigCache } = await import('../hooks/lib.mjs') as any;
       clearConfigCache();
 
@@ -171,7 +164,7 @@ user_id = "test"
     });
 
     it('should fail with clear error when no env and no config', async () => {
-      // @ts-ignore - hooks are plain JS
+      // @ts-expect-error - hooks are plain JS, no type declarations
       const { getMemoryRoot, clearConfigCache } = await import('../hooks/lib.mjs') as any;
       clearConfigCache();
 

@@ -28,7 +28,7 @@ import {
   type EncryptedPayload,
 } from './crypto.js';
 import { initStorageProvider, getStorageProvider } from './storage.js';
-import { InlinePolicyEngine, setPolicyEngine, resolveContextBinding, isGroupVisibleInContext } from './policy.js';
+import { InlinePolicyEngine, setPolicyEngine } from './policy.js';
 import { createBackup, restoreBackup } from './backup.js';
 import { periodicCheck } from './integrity.js';
 

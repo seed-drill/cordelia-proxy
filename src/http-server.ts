@@ -48,7 +48,7 @@ const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const SESSION_SECRET = process.env.CORDELIA_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
 // API key for CLI uploads (optional, set via CORDELIA_API_KEY)
-const API_KEY = process.env.CORDELIA_API_KEY;
+const _API_KEY = process.env.CORDELIA_API_KEY;
 
 // Determine base URL for OAuth callback
 // Priority: CORDELIA_BASE_URL > Fly.io detection > localhost
@@ -847,7 +847,7 @@ app.get('/api/admin/users', async (req: Request, res: Response) => {
             session_count: context.ephemeral?.session_count || 0,
           });
         }
-      } catch (e) {
+      } catch {
         // Skip users that can't be loaded
         userSummaries.push({
           id: userId,

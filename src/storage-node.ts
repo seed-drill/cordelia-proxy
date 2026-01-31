@@ -18,7 +18,7 @@ import type {
   AccessLogEntry,
 } from './storage.js';
 import { NodeClient, NodeClientError } from './node-client.js';
-import type { L2ReadResponse, GroupMemberInfo } from './node-client.js';
+import type { GroupMemberInfo } from './node-client.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
 

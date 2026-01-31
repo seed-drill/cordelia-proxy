@@ -8,7 +8,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { NodeStorageProvider } from './storage-node.js';
+import type { NodeStorageProvider as _NodeStorageProvider } from './storage-node.js';
 import { NodeClient, NodeClientError } from './node-client.js';
 
 const TEST_TOKEN = 'test-bearer-token-1234';
@@ -225,13 +225,13 @@ function createMockServer(): { server: http.Server; store: MockStore } {
 
 describe('NodeClient', () => {
   let server: http.Server;
-  let store: MockStore;
+  let _store: MockStore;
   let client: NodeClient;
 
   before(async () => {
     const mock = createMockServer();
     server = mock.server;
-    store = mock.store;
+    _store = mock.store;
     await new Promise<void>((resolve) => server.listen(TEST_PORT, resolve));
     client = new NodeClient({
       baseUrl: `http://127.0.0.1:${TEST_PORT}`,

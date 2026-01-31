@@ -135,7 +135,7 @@ describe('Identity Contract', () => {
   describe('config.toml identity mapping', () => {
     it('should parse identity.user_id as the storage key', async () => {
       // Import TOML parser
-      // @ts-ignore - hooks are plain JS
+      // @ts-expect-error - hooks are plain JS, no type declarations
       const { parseTOML } = await import('../hooks/lib.mjs') as any;
 
       const config = parseTOML(`
