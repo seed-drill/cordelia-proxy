@@ -342,7 +342,76 @@ app.get('/api/status', async (_req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/core/status - Core node status (proxied from core node)
+ */
+app.get('/api/core/status', async (_req: Request, res: Response) => {
+  if (!CORDELIA_CORE_API) {
+    res.json({
+      connected: false,
+      error: 'Core API not configured',
+      core_api: null,
+    });
+    return;
+  }
+
+  try {
+    // Read the bearer token from core's config directory
+    const fs = await import('fs/promises');
+    let bearerToken = '';
+    try {
+      bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
+    } catch {
+      // Token file may not exist yet
+    }
+
+    const response = await fetch(`${CORDELIA_CORE_API}/api/v1/status`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Core API returned ${response.status}`);
+    }
+
+    const data = await response.json() as {
+      node_id: string;
+      entity_id: string;
+      uptime_secs: number;
+      peers_warm: number;
+      peers_hot: number;
+      groups: string[];
+    };
+
+    res.json({
+      connected: true,
+      core_api: CORDELIA_CORE_API,
+      node_id: data.node_id,
+      entity_id: data.entity_id,
+      uptime_secs: data.uptime_secs,
+      peers: {
+        warm: data.peers_warm,
+        hot: data.peers_hot,
+        total: data.peers_warm + data.peers_hot,
+      },
+      groups: data.groups,
+    });
+  } catch (error) {
+    const err = error as Error & { cause?: Error };
+    console.error('Core status API error:', err.message, err.cause?.message || '');
+    res.json({
+      connected: false,
+      error: err.cause?.message || err.message,
+      core_api: CORDELIA_CORE_API,
+    });
+  }
+});
+
+/**
  * GET /api/peers - P2P network peer status (proxied from core node)
+ * @deprecated Use /api/core/status instead
  */
 app.get('/api/peers', async (_req: Request, res: Response) => {
   if (!CORDELIA_CORE_API) {

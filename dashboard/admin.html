@@ -143,6 +143,56 @@
       cursor: pointer;
       font-size: 0.9rem;
     }
+
+    .core-status-panel {
+      background: white;
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 2rem;
+    }
+
+    .core-status-panel h3 {
+      margin: 0 0 1rem 0;
+      color: var(--color-deep-green);
+      font-size: 1rem;
+    }
+
+    .core-status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+    }
+
+    .core-status-item {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .core-status-item .label {
+      font-size: 0.75rem;
+      color: var(--color-muted);
+      text-transform: uppercase;
+    }
+
+    .core-status-item .value {
+      font-weight: 600;
+      color: var(--color-charcoal);
+    }
+
+    .core-status-item .value.connected {
+      color: var(--color-deep-green);
+    }
+
+    .core-status-item .value.disconnected {
+      color: #c00;
+    }
+
+    .monospace {
+      font-family: 'Courier New', monospace;
+      font-size: 0.85rem;
+    }
   </style>
 </head>
 <body>
@@ -161,6 +211,33 @@
     <div id="loading" class="loading">Loading...</div>
 
     <div id="content" style="display: none;">
+      <!-- Core Node Connection Status -->
+      <div class="core-status-panel" id="core-status-panel">
+        <h3>Core Node Connection</h3>
+        <div class="core-status-grid">
+          <div class="core-status-item">
+            <span class="label">Status:</span>
+            <span class="value" id="core-connection-status">Checking...</span>
+          </div>
+          <div class="core-status-item">
+            <span class="label">Node ID:</span>
+            <span class="value monospace" id="core-node-id">-</span>
+          </div>
+          <div class="core-status-item">
+            <span class="label">Entity ID:</span>
+            <span class="value" id="core-entity-id">-</span>
+          </div>
+          <div class="core-status-item">
+            <span class="label">Uptime:</span>
+            <span class="value" id="core-uptime">-</span>
+          </div>
+          <div class="core-status-item">
+            <span class="label">API Endpoint:</span>
+            <span class="value monospace" id="core-api-endpoint">-</span>
+          </div>
+        </div>
+      </div>
+
       <!-- P2P Network Stats -->
       <div class="stats-row" id="peer-stats">
         <div class="stat-card">
@@ -260,6 +337,67 @@
       }
     }
 
+    async function loadCoreStatus() {
+      const statusEl = document.getElementById('core-connection-status');
+      const nodeIdEl = document.getElementById('core-node-id');
+      const entityIdEl = document.getElementById('core-entity-id');
+      const uptimeEl = document.getElementById('core-uptime');
+      const apiEndpointEl = document.getElementById('core-api-endpoint');
+
+      try {
+        const response = await fetch(`${API_BASE}/api/core/status`);
+        const data = await response.json();
+
+        if (data.connected) {
+          statusEl.textContent = 'Connected';
+          statusEl.className = 'value connected';
+          nodeIdEl.textContent = data.node_id ? data.node_id.substring(0, 16) + '...' : '-';
+          nodeIdEl.title = data.node_id || '';
+          entityIdEl.textContent = data.entity_id || '-';
+          uptimeEl.textContent = formatUptime(data.uptime_secs);
+          apiEndpointEl.textContent = data.api_endpoint || '-';
+
+          // Update peer counts from core status
+          if (data.peers) {
+            document.getElementById('peer-hot').textContent = data.peers.hot ?? '-';
+            document.getElementById('peer-warm').textContent = data.peers.warm ?? '-';
+            document.getElementById('peer-total').textContent = data.peers.total ?? '-';
+
+            if (data.peers.total > 0) {
+              document.getElementById('network-status').textContent = 'Online';
+              document.getElementById('network-status').style.color = 'var(--color-deep-green)';
+            } else {
+              document.getElementById('network-status').textContent = 'Isolated';
+              document.getElementById('network-status').style.color = 'var(--color-copper)';
+            }
+          }
+        } else {
+          statusEl.textContent = 'Disconnected';
+          statusEl.className = 'value disconnected';
+          nodeIdEl.textContent = '-';
+          entityIdEl.textContent = '-';
+          uptimeEl.textContent = '-';
+          apiEndpointEl.textContent = data.api_endpoint || '-';
+          document.getElementById('network-status').textContent = 'Offline';
+          document.getElementById('network-status').style.color = '#999';
+        }
+      } catch (error) {
+        console.error('Core status error:', error);
+        statusEl.textContent = 'Error';
+        statusEl.className = 'value disconnected';
+      }
+    }
+
+    function formatUptime(seconds) {
+      if (!seconds) return '-';
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      if (hours > 0) {
+        return `${hours}h ${minutes}m`;
+      }
+      return `${minutes}m`;
+    }
+
     async function loadPeerData() {
       try {
         const response = await fetch(`${API_BASE}/api/peers`);
@@ -355,10 +493,10 @@
       `;
 
       loadAdminData();
-      loadPeerData();
+      loadCoreStatus();
 
-      // Refresh peer data every 30 seconds
-      setInterval(loadPeerData, 30000);
+      // Refresh core status every 30 seconds
+      setInterval(loadCoreStatus, 30000);
     }
 
     async function logout() {
