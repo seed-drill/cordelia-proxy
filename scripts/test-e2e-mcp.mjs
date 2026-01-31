@@ -254,7 +254,7 @@ async function main() {
           data: {
             type: 'concept',
             name: 'E2E Test Concept',
-            content: 'This entity was created by the MCP E2E test suite.',
+            summary: 'Entity created by MCP E2E test suite for round-trip validation.',
             tags: ['e2e', 'test'],
           },
         },
