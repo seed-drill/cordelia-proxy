@@ -161,6 +161,27 @@
     <div id="loading" class="loading">Loading...</div>
 
     <div id="content" style="display: none;">
+      <!-- P2P Network Stats -->
+      <div class="stats-row" id="peer-stats">
+        <div class="stat-card">
+          <div class="count" id="peer-hot">-</div>
+          <div class="label">Hot Peers</div>
+        </div>
+        <div class="stat-card">
+          <div class="count" id="peer-warm">-</div>
+          <div class="label">Warm Peers</div>
+        </div>
+        <div class="stat-card">
+          <div class="count" id="peer-total">-</div>
+          <div class="label">Total Peers</div>
+        </div>
+        <div class="stat-card">
+          <div class="count" id="network-status">-</div>
+          <div class="label">Network</div>
+        </div>
+      </div>
+
+      <!-- Memory Stats -->
       <div class="stats-row">
         <div class="stat-card">
           <div class="count" id="user-count">0</div>
@@ -239,6 +260,31 @@
       }
     }
 
+    async function loadPeerData() {
+      try {
+        const response = await fetch(`${API_BASE}/api/peers`);
+        const data = await response.json();
+
+        document.getElementById('peer-hot').textContent = data.hot ?? '-';
+        document.getElementById('peer-warm').textContent = data.warm ?? '-';
+        document.getElementById('peer-total').textContent = data.total ?? '-';
+
+        if (data.error) {
+          document.getElementById('network-status').textContent = 'Offline';
+          document.getElementById('network-status').style.color = '#999';
+        } else if (data.total > 0) {
+          document.getElementById('network-status').textContent = 'Online';
+          document.getElementById('network-status').style.color = 'var(--color-deep-green)';
+        } else {
+          document.getElementById('network-status').textContent = 'Isolated';
+          document.getElementById('network-status').style.color = 'var(--color-copper)';
+        }
+      } catch (error) {
+        console.error('Peer data error:', error);
+        document.getElementById('network-status').textContent = 'Error';
+      }
+    }
+
     async function loadAdminData() {
       try {
         const response = await fetch(`${API_BASE}/api/admin/users`);
@@ -309,6 +355,10 @@
       `;
 
       loadAdminData();
+      loadPeerData();
+
+      // Refresh peer data every 30 seconds
+      setInterval(loadPeerData, 30000);
     }
 
     async function logout() {

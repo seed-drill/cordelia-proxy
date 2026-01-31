@@ -50,6 +50,9 @@ const SESSION_SECRET = process.env.CORDELIA_SESSION_SECRET || crypto.randomBytes
 // API key for CLI uploads (optional, set via CORDELIA_API_KEY)
 const _API_KEY = process.env.CORDELIA_API_KEY;
 
+// Core node API (optional, for P2P network status)
+const CORDELIA_CORE_API = process.env.CORDELIA_CORE_API;
+
 // Determine base URL for OAuth callback
 // Priority: CORDELIA_BASE_URL > Fly.io detection > localhost
 function getBaseUrl(): string {
@@ -335,6 +338,45 @@ app.get('/api/status', async (_req: Request, res: Response) => {
     });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * GET /api/peers - P2P network peer status (proxied from core node)
+ */
+app.get('/api/peers', async (_req: Request, res: Response) => {
+  if (!CORDELIA_CORE_API) {
+    res.json({ error: 'Core API not configured', warm: 0, hot: 0, total: 0 });
+    return;
+  }
+
+  try {
+    // Read the bearer token from core's config directory
+    const fs = await import('fs/promises');
+    let bearerToken = '';
+    try {
+      bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
+    } catch {
+      // Token file may not exist yet
+    }
+
+    const response = await fetch(`${CORDELIA_CORE_API}/api/v1/peers`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Core API returned ${response.status}`);
+    }
+
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error('Peers API error:', error);
+    res.json({ error: (error as Error).message, warm: 0, hot: 0, total: 0 });
   }
 });
 
