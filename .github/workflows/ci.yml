@@ -83,3 +83,26 @@ jobs:
       - run: npm run build
       - name: Verify dist output
         run: test -d dist && test -f dist/server.js
+
+  integration:
+    name: Integration (self-hosted)
+    needs: lint
+    runs-on: [self-hosted, cordelia-ci]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      # Full test suite
+      - name: Unit + integration tests
+        run: npm test
+
+      # End-to-end install.sh test in clean container
+      - name: Install.sh e2e test
+        run: |
+          docker build -t cordelia-install-test -f Dockerfile.test .
+          docker run --rm cordelia-install-test

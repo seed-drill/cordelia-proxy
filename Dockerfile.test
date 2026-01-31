@@ -1,0 +1,62 @@
+# Cordelia install.sh end-to-end test
+#
+# Validates the full install flow in a clean environment:
+# 1. install.sh creates config.toml with correct identity
+# 2. Hooks resolve user_id from config.toml (no hardcoded fallback)
+# 3. Settings.json hooks don't pass user_id as CLI arg
+# 4. Hook fails with clear error when no config and no CLI arg
+
+FROM ubuntu:24.04
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+      curl ca-certificates git && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Simulate Claude Code being available (install.sh checks for it)
+RUN echo '#!/bin/sh' > /usr/local/bin/claude && \
+    echo 'echo "claude mock"' >> /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude
+
+# Copy the project
+COPY . /opt/cordelia-proxy
+WORKDIR /opt/cordelia-proxy
+
+# Create a test user
+RUN useradd -m -s /bin/bash testuser
+
+# Run install.sh as testuser
+USER testuser
+ENV HOME=/home/testuser
+
+RUN ./install.sh testuser --no-embeddings
+
+# Verify assertions as a separate step (clear test output)
+RUN bash -c 'set -euo pipefail && \
+  echo "--- Verify config.toml ---" && \
+  test -f ~/.cordelia/config.toml && \
+  grep -q "\\[identity\\]" ~/.cordelia/config.toml && \
+  grep -q "user_id = \"testuser\"" ~/.cordelia/config.toml && \
+  grep -q "\\[paths\\]" ~/.cordelia/config.toml && \
+  echo "PASS: config.toml has identity and paths" && \
+  \
+  echo "--- Verify L1 context ---" && \
+  test -f memory/L1-hot/testuser.json && \
+  echo "PASS: L1 file exists" && \
+  \
+  echo "--- Verify hooks have no hardcoded user_id arg ---" && \
+  ! grep -q "session-start.mjs testuser" ~/.claude/settings.json && \
+  ! grep -q "session-end.mjs testuser" ~/.claude/settings.json && \
+  echo "PASS: hooks use config.toml, not CLI arg" && \
+  \
+  echo "--- Verify hook fails without config or arg ---" && \
+  mv ~/.cordelia/config.toml ~/.cordelia/config.toml.bak && \
+  FAIL_OUTPUT=$(HOME=/nonexistent CORDELIA_MEMORY_ROOT="$(pwd)/memory" node hooks/session-start.mjs 2>&1 || true) && \
+  echo "$FAIL_OUTPUT" | grep -q "No user_id configured" && \
+  mv ~/.cordelia/config.toml.bak ~/.cordelia/config.toml && \
+  echo "PASS: hook fails with clear error when no config" && \
+  \
+  echo "" && \
+  echo "=== ALL E2E TESTS PASSED ==="'
