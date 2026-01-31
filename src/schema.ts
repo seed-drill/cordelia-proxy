@@ -111,6 +111,28 @@ export type Integrity = z.infer<typeof IntegritySchema>;
 export type Vessel = z.infer<typeof VesselSchema>;
 
 // =============================================================================
+// Group Culture Schema
+// =============================================================================
+
+/**
+ * Group culture governs broadcast behavior, TTL, notifications, and departure.
+ * Maps to cache coherence protocols:
+ *   chatty = write-update, moderate = write-invalidate, taciturn = TTL expiry
+ */
+export const GroupCultureSchema = z.object({
+  broadcast_eagerness: z.enum(['chatty', 'moderate', 'taciturn']).default('moderate')
+    .describe('Replication strategy: chatty=eager push, moderate=notify-and-fetch, taciturn=passive'),
+  ttl_default: z.number().int().positive().nullable().default(null)
+    .describe('Default TTL in seconds for group-cached memories. Null = no expiry'),
+  notification_policy: z.enum(['push', 'notify', 'silent']).default('notify')
+    .describe('How members are notified of new content'),
+  departure_policy: z.enum(['permissive', 'standard', 'restrictive']).default('standard')
+    .describe('What happens to shared memories when a member leaves'),
+});
+
+export type GroupCulture = z.infer<typeof GroupCultureSchema>;
+
+// =============================================================================
 // Encryption Schema
 // =============================================================================
 

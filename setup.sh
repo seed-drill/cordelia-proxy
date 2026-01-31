@@ -20,6 +20,17 @@ USER_ID=""
 ENCRYPTION_KEY=""
 NO_EMBEDDINGS=false
 
+# OS detection
+detect_os() {
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
+        Linux)  echo "linux" ;;
+        *)      echo "unknown" ;;
+    esac
+}
+
+OS="$(detect_os)"
+
 # Parse arguments
 for arg in "$@"; do
     case $arg in
@@ -76,7 +87,11 @@ echo ""
 # Step 1: Check Node.js
 step "Checking prerequisites..."
 if ! command -v node &> /dev/null; then
-    error "Node.js is required but not installed. Install via: brew install node"
+    if [ "$OS" = "linux" ]; then
+        error "Node.js is required but not installed. Install via: curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs"
+    else
+        error "Node.js is required but not installed. Install via: brew install node"
+    fi
 fi
 info "Node.js: $(node --version)"
 
@@ -225,7 +240,12 @@ echo "========================================"
 echo "   Setup Complete - Manual Steps Below"
 echo "========================================"
 echo ""
-echo "1. Add encryption key to your shell profile (~/.zshrc):"
+if [ "$OS" = "linux" ]; then
+    SUGGESTED_PROFILE="~/.bashrc"
+else
+    SUGGESTED_PROFILE="~/.zshrc"
+fi
+echo "1. Add encryption key to your shell profile ($SUGGESTED_PROFILE):"
 echo ""
 echo "   export CORDELIA_ENCRYPTION_KEY=\"$ENCRYPTION_KEY\""
 echo ""

@@ -139,7 +139,12 @@ export async function initStorageProvider(memoryRoot: string): Promise<StoragePr
 
   let provider: StorageProvider;
 
-  if (storageType === 'sqlite') {
+  if (storageType === 'node') {
+    const { NodeStorageProvider } = await import('./storage-node.js');
+    const nodeUrl = process.env.CORDELIA_NODE_URL || 'http://127.0.0.1:9473';
+    const nodeToken = process.env.CORDELIA_NODE_TOKEN || '';
+    provider = new NodeStorageProvider(nodeUrl, nodeToken, memoryRoot);
+  } else if (storageType === 'sqlite') {
     const { SqliteStorageProvider } = await import('./storage-sqlite.js');
     provider = new SqliteStorageProvider(memoryRoot);
   } else {

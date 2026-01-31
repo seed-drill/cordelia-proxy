@@ -21,6 +21,17 @@ CORDELIA_DIR="$(cd "$(dirname "$0")" && pwd)"
 USER_ID=""
 NO_EMBEDDINGS=false
 
+# OS detection
+detect_os() {
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
+        Linux)  echo "linux" ;;
+        *)      echo "unknown" ;;
+    esac
+}
+
+OS="$(detect_os)"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -83,29 +94,43 @@ echo ""
 # ============================================
 step "Checking prerequisites..."
 
-# Check for Homebrew (needed for Node if missing)
-if ! command -v brew &> /dev/null; then
-    warn "Homebrew not found. Installing..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    info "Homebrew installed"
-else
-    info "Homebrew found"
-fi
-
-# Check for Node.js
+# Check for Node.js (platform-aware install)
 if ! command -v node &> /dev/null; then
     warn "Node.js not found. Installing..."
-    brew install node
+    if [ "$OS" = "macos" ]; then
+        if ! command -v brew &> /dev/null; then
+            warn "Homebrew not found. Installing..."
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            info "Homebrew installed"
+        fi
+        brew install node
+    elif [ "$OS" = "linux" ]; then
+        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+    else
+        error "Unsupported OS: $(uname -s). Supported: macOS, Linux."
+    fi
     info "Node.js installed"
 else
     info "Node.js $(node --version)"
 fi
 
-# Check for Claude Code
+# Check for Claude Code (with Linux npm fallback)
 if ! command -v claude &> /dev/null; then
-    error "Claude Code not found. Please install from: https://claude.ai/download"
+    if [ "$OS" = "linux" ]; then
+        warn "Claude Code not found. Installing via npm..."
+        npm install -g @anthropic-ai/claude-code
+        if command -v claude &> /dev/null; then
+            info "Claude Code installed via npm"
+        else
+            error "Claude Code installation failed. Install manually: npm install -g @anthropic-ai/claude-code"
+        fi
+    else
+        error "Claude Code not found. Please install from: https://claude.ai/download"
+    fi
+else
+    info "Claude Code found"
 fi
-info "Claude Code found"
 
 # ============================================
 # Step 2: Build Cordelia
@@ -345,16 +370,31 @@ info "Skills installed: persist, sprint, remember"
 # ============================================
 step "Setting up shell environment..."
 
-# Detect shell profile
-if [ -f "$HOME/.zshrc" ]; then
-    SHELL_PROFILE="$HOME/.zshrc"
-elif [ -f "$HOME/.bashrc" ]; then
-    SHELL_PROFILE="$HOME/.bashrc"
-elif [ -f "$HOME/.bash_profile" ]; then
-    SHELL_PROFILE="$HOME/.bash_profile"
+# Detect shell profile (platform-aware defaults)
+if [ "$OS" = "linux" ]; then
+    # Linux: prefer .bashrc (most common default shell)
+    if [ -f "$HOME/.bashrc" ]; then
+        SHELL_PROFILE="$HOME/.bashrc"
+    elif [ -f "$HOME/.zshrc" ]; then
+        SHELL_PROFILE="$HOME/.zshrc"
+    elif [ -f "$HOME/.bash_profile" ]; then
+        SHELL_PROFILE="$HOME/.bash_profile"
+    else
+        SHELL_PROFILE="$HOME/.bashrc"
+        touch "$SHELL_PROFILE"
+    fi
 else
-    SHELL_PROFILE="$HOME/.zshrc"
-    touch "$SHELL_PROFILE"
+    # macOS: prefer .zshrc (default since Catalina)
+    if [ -f "$HOME/.zshrc" ]; then
+        SHELL_PROFILE="$HOME/.zshrc"
+    elif [ -f "$HOME/.bashrc" ]; then
+        SHELL_PROFILE="$HOME/.bashrc"
+    elif [ -f "$HOME/.bash_profile" ]; then
+        SHELL_PROFILE="$HOME/.bash_profile"
+    else
+        SHELL_PROFILE="$HOME/.zshrc"
+        touch "$SHELL_PROFILE"
+    fi
 fi
 
 # Check if key already in profile

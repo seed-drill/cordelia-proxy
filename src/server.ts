@@ -16,7 +16,7 @@ import {
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import * as path from 'path';
-import { L1HotContextSchema, type L1HotContext } from './schema.js';
+import { L1HotContextSchema, GroupCultureSchema, type L1HotContext } from './schema.js';
 import { analyzeNovelty, analyzeSession, filterForPersistence, type NoveltyResult } from './novelty.js';
 import * as l2 from './l2.js';
 import {
@@ -989,6 +989,13 @@ class CordeliaServer {
             culture?: Record<string, unknown>;
           };
           const storage = getStorageProvider();
+          // Validate culture against schema if provided
+          if (culture && Object.keys(culture).length > 0) {
+            const parsed = GroupCultureSchema.safeParse(culture);
+            if (!parsed.success) {
+              return { content: [{ type: 'text', text: JSON.stringify({ error: `invalid culture: ${parsed.error.message}` }) }] };
+            }
+          }
           const cultureStr = culture ? JSON.stringify(culture) : '{}';
           try {
             await storage.createGroup(id, groupName, cultureStr, '{}');
