@@ -9,10 +9,9 @@ primary_region = 'lhr'
 [build]
   dockerfile = 'Dockerfile.fly'
 
-# Process definitions
+# Single process running both proxy and core
 [processes]
-  proxy = "node /home/cordelia/proxy/dist/http-server.js"
-  core = "sh -c 'mkdir -p /data/core && test -f /data/core/config.toml || cp /home/cordelia/default-config.toml /data/core/config.toml; exec cordelia-node --config /data/core/config.toml'"
+  app = "sh -c 'mkdir -p /data/core && test -f /data/core/config.toml || cp /home/cordelia/default-config.toml /data/core/config.toml; cordelia-node --config /data/core/config.toml & node /home/cordelia/proxy/dist/http-server.js'"
 
 # HTTP service for proxy dashboard
 [http_service]
@@ -21,21 +20,13 @@ primary_region = 'lhr'
   auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 1
-  processes = ['proxy']
-
-# Core API service (internal, for proxy -> core communication)
-[[services]]
-  internal_port = 9473
-  protocol = 'tcp'
-  processes = ['core']
-  [[services.ports]]
-    port = 9473
+  processes = ['app']
 
 # Core P2P service (UDP for QUIC)
 [[services]]
   internal_port = 9474
   protocol = 'udp'
-  processes = ['core']
+  processes = ['app']
   [[services.ports]]
     port = 9474
 
@@ -46,7 +37,7 @@ primary_region = 'lhr'
 [env]
   CORDELIA_MEMORY_ROOT = '/data/memory'
   CORDELIA_STORAGE = 'sqlite'
-  CORDELIA_CORE_API = 'http://cordelia-proxy.internal:9473'
+  CORDELIA_CORE_API = 'http://localhost:9473'
 
 [[vm]]
   memory = '512mb'
