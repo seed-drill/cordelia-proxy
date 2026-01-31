@@ -12,7 +12,7 @@ primary_region = 'lhr'
 # Process definitions
 [processes]
   proxy = "node /home/cordelia/proxy/dist/http-server.js"
-  core = "sh -c 'test -f /data/core/config.toml || cp /home/cordelia/default-config.toml /data/core/config.toml; exec cordelia-node --config /data/core/config.toml'"
+  core = "sh -c 'mkdir -p /data/core && test -f /data/core/config.toml || cp /home/cordelia/default-config.toml /data/core/config.toml; exec cordelia-node --config /data/core/config.toml'"
 
 # HTTP service for proxy dashboard
 [http_service]
