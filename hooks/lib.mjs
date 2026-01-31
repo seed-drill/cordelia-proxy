@@ -16,7 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // --- Constants ---
 
 export const CORDELIA_DIR = path.resolve(__dirname, '..');
-export const MEMORY_ROOT = path.join(CORDELIA_DIR, 'memory');
+export const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT || path.join(CORDELIA_DIR, 'memory');
 const KEY_LENGTH = 32;
 const AES_ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
