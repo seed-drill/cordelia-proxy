@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  proxy:
+    build: .
+    container_name: cordelia-proxy
+    ports:
+      - "3847:3847"
+    volumes:
+      - proxy-memory:/app/memory
+      - proxy-config:/home/node/.cordelia
+    environment:
+      - CORDELIA_STORAGE=sqlite
+      - CORDELIA_ENCRYPTION_KEY=${CORDELIA_ENCRYPTION_KEY}
+      - CORDELIA_CORE_API=http://core:9473
+    depends_on:
+      - core
+    restart: unless-stopped
+
+  core:
+    build:
+      context: ../cordelia-core
+      dockerfile: Dockerfile
+    container_name: cordelia-core
+    ports:
+      - "9473:9473"   # HTTP API
+      - "9474:9474/udp"  # P2P QUIC
+    volumes:
+      - core-data:/home/cordelia/.cordelia
+    restart: unless-stopped
+
+volumes:
+  proxy-memory:
+  proxy-config:
+  core-data:

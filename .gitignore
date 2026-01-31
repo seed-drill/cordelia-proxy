@@ -13,6 +13,7 @@ backup-*.json
 # Security -- never commit secrets
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 credentials.json
