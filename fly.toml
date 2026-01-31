@@ -1,9 +1,9 @@
-# fly.toml app configuration file generated for cordelia-seed-drill on 2026-01-28T18:24:25Z
+# fly.toml app configuration file generated for cordelia-proxy on 2026-01-28T18:24:25Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'cordelia-seed-drill'
+app = 'cordelia-proxy'
 primary_region = 'lhr'
 
 [build]
