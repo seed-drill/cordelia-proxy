@@ -375,8 +375,15 @@ app.get('/api/peers', async (_req: Request, res: Response) => {
     const data = await response.json();
     res.json(data);
   } catch (error) {
-    console.error('Peers API error:', error);
-    res.json({ error: (error as Error).message, warm: 0, hot: 0, total: 0 });
+    const err = error as Error & { cause?: Error };
+    console.error('Peers API error:', err.message, err.cause?.message || '');
+    res.json({
+      error: err.cause?.message || err.message,
+      core_api: CORDELIA_CORE_API,
+      warm: 0,
+      hot: 0,
+      total: 0
+    });
   }
 });
 
