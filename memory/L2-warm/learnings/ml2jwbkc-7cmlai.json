@@ -1,0 +1,12 @@
+{
+  "id": "ml2jwbkc-7cmlai",
+  "type": "insight",
+  "content": "Testing is important for reliability",
+  "confidence": 0.9,
+  "validated": false,
+  "tags": [
+    "testing",
+    "quality"
+  ],
+  "created_at": "2026-01-31T16:53:12.204Z"
+}

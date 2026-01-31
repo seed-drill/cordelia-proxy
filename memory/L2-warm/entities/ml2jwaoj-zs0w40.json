@@ -1,0 +1,15 @@
+{
+  "id": "ml2jwaoj-zs0w40",
+  "type": "person",
+  "name": "Test Person",
+  "aliases": [],
+  "tags": [
+    "test",
+    "person"
+  ],
+  "summary": "A test person for unit tests",
+  "details": {},
+  "refs": [],
+  "created_at": "2026-01-31T16:53:11.058Z",
+  "updated_at": "2026-01-31T16:53:11.058Z"
+}
