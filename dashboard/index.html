@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cordelia - Persistent Memory for AI</title>
+  <link rel="stylesheet" href="css/styles.css?v=2">
+  <style>
+    /* Landing Page Styles */
+    .landing {
+      display: none;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, var(--color-deep-green) 0%, var(--color-light-green) 100%);
+      color: white;
+      padding: 4rem 2rem;
+      text-align: center;
+    }
+
+    .hero-logo {
+      font-size: 4rem;
+      margin-bottom: 1rem;
+    }
+
+    .hero h1 {
+      font-size: 2.5rem;
+      margin-bottom: 0.5rem;
+      font-weight: 700;
+    }
+
+    .hero-tagline {
+      font-size: 1.25rem;
+      opacity: 0.9;
+      margin-bottom: 2rem;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .hero-cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      background-color: white;
+      color: var(--color-deep-green);
+      padding: 1rem 2rem;
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 1.1rem;
+      font-weight: 600;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .hero-cta:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+
+    .hero-cta svg {
+      width: 24px;
+      height: 24px;
+      fill: currentColor;
+    }
+
+    .features {
+      padding: 4rem 2rem;
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    .features h2 {
+      text-align: center;
+      color: var(--color-deep-green);
+      font-size: 1.75rem;
+      margin-bottom: 3rem;
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 2rem;
+    }
+
+    .feature-card {
+      background: white;
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+
+    .feature-icon {
+      font-size: 2rem;
+      margin-bottom: 1rem;
+    }
+
+    .feature-card h3 {
+      color: var(--color-deep-green);
+      margin-bottom: 0.5rem;
+      font-size: 1.1rem;
+    }
+
+    .feature-card p {
+      color: var(--color-muted);
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
+    .how-it-works {
+      background-color: #f5f7f5;
+      padding: 4rem 2rem;
+    }
+
+    .how-it-works h2 {
+      text-align: center;
+      color: var(--color-deep-green);
+      font-size: 1.75rem;
+      margin-bottom: 3rem;
+    }
+
+    .steps {
+      max-width: 800px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .step {
+      display: flex;
+      gap: 1.5rem;
+      align-items: flex-start;
+    }
+
+    .step-number {
+      flex-shrink: 0;
+      width: 40px;
+      height: 40px;
+      background-color: var(--color-copper);
+      color: white;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+    }
+
+    .step-content h3 {
+      color: var(--color-charcoal);
+      margin-bottom: 0.25rem;
+    }
+
+    .step-content p {
+      color: var(--color-muted);
+      font-size: 0.95rem;
+    }
+
+    .cta-section {
+      text-align: center;
+      padding: 4rem 2rem;
+      background: white;
+    }
+
+    .cta-section h2 {
+      color: var(--color-deep-green);
+      margin-bottom: 1rem;
+    }
+
+    .cta-section p {
+      color: var(--color-muted);
+      margin-bottom: 2rem;
+      max-width: 500px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .github-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      background-color: #24292e;
+      color: white;
+      padding: 0.875rem 1.5rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 1rem;
+      font-weight: 500;
+      transition: background-color 0.2s;
+    }
+
+    .github-btn:hover {
+      background-color: #1a1e22;
+    }
+
+    .github-btn svg {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
+    }
+
+    /* Header auth buttons */
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .header-user {
+      font-size: 0.9rem;
+      opacity: 0.9;
+    }
+
+    .logout-btn {
+      padding: 0.4rem 1rem;
+      background-color: var(--color-copper);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      transition: background-color 0.2s;
+    }
+
+    .logout-btn:hover {
+      background-color: #a0632d;
+    }
+
+    .login-btn-header {
+      padding: 0.4rem 1rem;
+      background-color: white;
+      color: var(--color-deep-green);
+      border: none;
+      border-radius: 4px;
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+
+    .login-btn-header:hover {
+      background-color: #f0f0f0;
+    }
+
+    .footer-nav {
+      margin: 0.5rem 0;
+    }
+
+    .footer-nav a {
+      color: var(--color-muted);
+      text-decoration: none;
+    }
+
+    .footer-nav a:hover {
+      color: var(--color-deep-green);
+    }
+
+    /* Account Management */
+    .account-actions {
+      display: flex;
+      gap: 2rem;
+    }
+
+    .account-action {
+      flex: 1;
+      padding: 1rem;
+      background: #f9f9f9;
+      border-radius: 8px;
+    }
+
+    .account-action h3 {
+      margin: 0 0 0.5rem 0;
+      color: var(--color-charcoal);
+      font-size: 1rem;
+    }
+
+    .account-action p {
+      margin: 0 0 1rem 0;
+      color: var(--color-muted);
+      font-size: 0.9rem;
+    }
+
+    .account-action.danger {
+      background: #fff5f5;
+      border: 1px solid #fcc;
+    }
+
+    .btn {
+      padding: 0.5rem 1rem;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-primary {
+      background: var(--color-deep-green);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: var(--color-light-green);
+    }
+
+    .btn-secondary {
+      background: #e0e0e0;
+      color: var(--color-charcoal);
+    }
+
+    .btn-secondary:hover {
+      background: #d0d0d0;
+    }
+
+    .btn-danger {
+      background: #dc3545;
+      color: white;
+    }
+
+    .btn-danger:hover {
+      background: #c82333;
+    }
+
+    /* Modal */
+    .modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+
+    .modal-content {
+      background: white;
+      padding: 2rem;
+      border-radius: 12px;
+      max-width: 450px;
+      width: 90%;
+    }
+
+    .modal-content h3 {
+      margin: 0 0 1rem 0;
+      color: var(--color-charcoal);
+    }
+
+    .modal-content p {
+      margin: 0 0 1.5rem 0;
+      color: var(--color-muted);
+    }
+
+    .checkbox-label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+      color: var(--color-charcoal);
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 1rem;
+      justify-content: flex-end;
+    }
+
+    @media (max-width: 768px) {
+      .account-actions {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Cordelia</h1>
+    <div class="header-actions" id="header-actions">
+      <!-- Populated by JS based on auth state -->
+    </div>
+  </header>
+
+  <!-- Landing Page (shown when not authenticated) -->
+  <div id="landing" class="landing">
+    <section class="hero">
+      <div class="hero-logo">🧠</div>
+      <h1>Cordelia</h1>
+      <p class="hero-tagline">
+        Persistent memory for AI assistants. Give Claude context that lasts across sessions,
+        so every conversation builds on the last.
+      </p>
+      <a href="/auth/github" class="hero-cta">
+        <svg viewBox="0 0 16 16">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+        Sign in with GitHub
+      </a>
+    </section>
+
+    <section class="features">
+      <h2>Why Cordelia?</h2>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">🔄</div>
+          <h3>Session Continuity</h3>
+          <p>Your AI assistant remembers your projects, preferences, and context. No more repeating yourself every conversation.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔐</div>
+          <h3>Encrypted & Private</h3>
+          <p>Your data is encrypted at rest with AES-256. You control your memory, and it never leaves your infrastructure.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">⚡</div>
+          <h3>Three-Layer Architecture</h3>
+          <p>Hot context for immediate recall, warm index for searchable history, cold archive for long-term storage.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔌</div>
+          <h3>MCP Native</h3>
+          <p>Built on the Model Context Protocol. Works with Claude Code, Claude Desktop, and any MCP-compatible client.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">👥</div>
+          <h3>Team Ready</h3>
+          <p>Share context with your team. Group memories, delegation rules, and access controls built in.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📊</div>
+          <h3>Dashboard</h3>
+          <p>View and manage your identity, preferences, and memory through a clean web interface.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="how-it-works">
+      <h2>How It Works</h2>
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h3>Connect</h3>
+            <p>Add Cordelia as an MCP server to Claude Code or Claude Desktop. Your memory system is ready.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h3>Converse</h3>
+            <p>Work with Claude as usual. Cordelia automatically captures important context, learnings, and session history.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h3>Continue</h3>
+            <p>Start a new session and Claude already knows your projects, preferences, and recent work. True continuity.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="cta-section">
+      <h2>Ready to give your AI a memory?</h2>
+      <p>Sign in with GitHub to create your profile and start building persistent context.</p>
+      <a href="/auth/github" class="github-btn">
+        <svg viewBox="0 0 16 16">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+        Get Started with GitHub
+      </a>
+    </section>
+  </div>
+
+  <!-- Dashboard (shown when authenticated) -->
+  <main id="dashboard-container" style="display: none;">
+    <div id="loading" class="loading">Loading...</div>
+    <div id="error" class="error" style="display: none;"></div>
+
+    <div id="dashboard" style="display: none;">
+      <!-- Row 1: Identity + Active State -->
+      <div class="row">
+        <section class="card identity-card">
+          <h2>Identity</h2>
+          <p class="card-description">Your profile: name, GitHub ID, timezone, interests, heroes, and API key for CLI sync.</p>
+          <div id="identity-content"></div>
+        </section>
+        <section class="card active-card">
+          <h2>Active State</h2>
+          <p class="card-description">Current project, focus area, blockers, and next actions. Updated as you work with Claude.</p>
+          <div id="active-content"></div>
+        </section>
+      </div>
+
+      <!-- Row 2: Preferences + Delegation -->
+      <div class="row">
+        <section class="card prefs-card">
+          <h2>Preferences</h2>
+          <p class="card-description">How you want Claude to work: planning mode, feedback style, verbosity, emoji use, and auto-commit settings.</p>
+          <div id="prefs-content"></div>
+        </section>
+        <section class="card delegation-card">
+          <h2>Delegation</h2>
+          <p class="card-description">What Claude can do autonomously vs what requires your approval. Controls file operations, git actions, and external calls.</p>
+          <div id="delegation-content"></div>
+        </section>
+      </div>
+
+      <!-- Row 3: Key References -->
+      <div class="row">
+        <section class="card refs-card full-width">
+          <h2>Key References</h2>
+          <p class="card-description">Important files, documents, or resources that Claude should be aware of across sessions.</p>
+          <div id="refs-content"></div>
+        </section>
+      </div>
+
+      <!-- Row 4: Session Continuity -->
+      <div class="row">
+        <section class="card ephemeral-card full-width">
+          <h2>Session Continuity</h2>
+          <p class="card-description">Session tracking, sync status, and integrity chain. The chain hash creates a tamper-evident audit trail of all changes to your memory.</p>
+          <div id="ephemeral-content"></div>
+        </section>
+      </div>
+
+      <!-- Row 5: L2 Memory Summary -->
+      <div class="row">
+        <section class="card l2-card full-width">
+          <h2>L2 Memory Summary</h2>
+          <p class="card-description">Searchable archive of past conversations. Stores entities (people, projects, concepts), session summaries, and learnings you've told Claude to remember.</p>
+          <div id="l2-content"></div>
+        </section>
+      </div>
+
+      <!-- Row 6: Account Management -->
+      <div class="row">
+        <section class="card account-card full-width">
+          <h2>Account Management</h2>
+          <p class="card-description">Manage your API keys for CLI sync, export your data, or delete your profile.</p>
+          <div class="account-actions">
+            <div class="account-action">
+              <h3>API Key for CLI Sync</h3>
+              <p>Generate an API key to sync your local Cordelia with the cloud.</p>
+              <div id="api-key-display" style="display: none; margin-bottom: 1rem;">
+                <code id="api-key-value" style="display: block; background: #1a1a1a; color: #10b981; padding: 0.75rem; border-radius: 6px; font-size: 0.85rem; word-break: break-all; margin-bottom: 0.5rem;"></code>
+                <button class="btn btn-secondary" onclick="copyApiKey()" id="copy-btn">Copy to Clipboard</button>
+              </div>
+              <button class="btn btn-primary" onclick="generateApiKey()" id="generate-key-btn">Generate New API Key</button>
+            </div>
+            <div class="account-action">
+              <h3>Export Your Data</h3>
+              <p>Download all your Cordelia data including L1 context and L2 memory items.</p>
+              <button class="btn btn-primary" onclick="exportProfile()">Download Export</button>
+            </div>
+            <div class="account-action danger">
+              <h3>Delete Profile</h3>
+              <p>Permanently delete your profile and optionally all associated memory. This cannot be undone.</p>
+              <button class="btn btn-danger" onclick="showDeleteConfirm()">Delete Profile</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Delete Confirmation Modal -->
+    <div id="delete-modal" class="modal" style="display: none;">
+      <div class="modal-content">
+        <h3>Delete Profile</h3>
+        <p>Are you sure? This action cannot be undone. Suicide is painless, but your data will be gone forever.</p>
+        <label class="checkbox-label">
+          <input type="checkbox" id="delete-l2-checkbox">
+          Also delete all L2 memory items (entities, sessions, learnings)
+        </label>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="hideDeleteConfirm()">Cancel</button>
+          <button class="btn btn-danger" onclick="confirmDelete()">Yes, Delete Everything</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <p>Project Cordelia - Seed Drill</p>
+    <nav class="footer-nav">
+      <a href="/admin.html">Admin</a> |
+      <a href="/api/docs">API Docs</a> |
+      <a href="/pricing.html">Pricing</a> |
+      <a href="https://github.com/seed-drill/cordelia-proxy">GitHub</a>
+    </nav>
+    <p id="status-line"></p>
+  </footer>
+
+  <script src="js/app.js?v=6"></script>
+</body>
+</html>

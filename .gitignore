@@ -1,0 +1,18 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Memory data (local only, never committed)
+memory/audit.jsonl
+memory/*.db
+memory/*.db-wal
+memory/*.db-shm
+backup-*.json
+
+# Security -- never commit secrets
+.env
+.env.*
+*.pem
+*.key
+credentials.json

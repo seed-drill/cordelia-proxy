@@ -1,0 +1,1152 @@
+/**
+ * Project Cordelia - L2 Warm Index Module
+ *
+ * Searchable memory layer for content that isn't always loaded
+ * but can be retrieved on demand.
+ *
+ * Search paths:
+ *   SQL path (SQLite + FTS5): FTS5 BM25 + optional sqlite-vec cosine, 70/30 hybrid
+ *   Legacy path (JSON provider): in-memory keyword + optional cosine similarity
+ */
+
+import * as crypto from 'crypto';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import {
+  L2IndexSchema,
+  L2EntitySchema,
+  L2SessionSchema,
+  L2LearningSchema,
+  type L2Index,
+  type L2IndexEntry,
+  type L2Entity,
+  type L2Session,
+  type L2Learning,
+} from './schema.js';
+import {
+  getDefaultProvider,
+  cosineSimilarity,
+  getEmbeddableText,
+  type EmbeddingProvider,
+} from './embeddings.js';
+import {
+  getDefaultCryptoProvider,
+  isEncryptedPayload,
+  type EncryptedPayload,
+} from './crypto.js';
+import { getStorageProvider } from './storage.js';
+import type { SqliteStorageProvider } from './storage-sqlite.js';
+
+export const L2_ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory', 'L2-warm');
+
+// In-memory embedding cache - fallback for JSON provider
+// For SQLite, embeddings are persisted in embedding_cache table
+const embeddingCache = new Map<string, number[]>();
+
+/**
+ * Clear the embedding cache (for testing).
+ */
+export function clearEmbeddingCache(): void {
+  embeddingCache.clear();
+}
+
+/**
+ * Get embedding cache size (for status reporting).
+ */
+export function getEmbeddingCacheSize(): number {
+  return embeddingCache.size;
+}
+
+type L2Item = L2Entity | L2Session | L2Learning;
+type L2ItemType = 'entity' | 'session' | 'learning';
+
+/**
+ * Group culture fields consumed at runtime (R3-011).
+ */
+export interface GroupCulture {
+  ttl_default?: number | null;          // seconds before group items expire
+  broadcast_eagerness?: 'chatty' | 'moderate' | 'taciturn';  // notification frequency
+  notification_policy?: 'push' | 'notify' | 'silent';        // how peers are notified
+}
+
+/**
+ * Read and parse a group's culture from storage.
+ * Returns null if group not found or culture unparseable.
+ */
+export async function getGroupCulture(groupId: string): Promise<GroupCulture | null> {
+  const storage = getStorageProvider();
+  const group = await storage.readGroup(groupId);
+  if (!group) return null;
+  try {
+    return JSON.parse(group.culture) as GroupCulture;
+  } catch {
+    return null;
+  }
+}
+
+export interface SearchResult {
+  id: string;
+  type: L2ItemType;
+  subtype?: string;
+  name: string;
+  tags: string[];
+  path: string;
+  score: number;
+}
+
+export interface SearchOptions {
+  query?: string;
+  type?: L2ItemType;
+  tags?: string[];
+  limit?: number;
+  semantic?: boolean; // Enable semantic search (default: true if embeddings available)
+}
+
+/**
+ * Compute SHA-256 hash of text for embedding cache key.
+ */
+function contentHash(text: string): string {
+  return crypto.createHash('sha256').update(text, 'utf-8').digest('hex');
+}
+
+/**
+ * Convert number[] embedding to Float32Array.
+ */
+function toFloat32Array(embedding: number[]): Float32Array {
+  return new Float32Array(embedding);
+}
+
+/**
+ * Convert Buffer (from embedding_cache) to number[].
+ */
+function bufferToEmbedding(buf: Buffer): number[] {
+  const f32 = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+  return Array.from(f32);
+}
+
+/**
+ * Convert number[] to Buffer for storage.
+ */
+function embeddingToBuffer(embedding: number[]): Buffer {
+  const f32 = new Float32Array(embedding);
+  return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
+}
+
+/**
+ * Check if current storage is SQLite with FTS data.
+ */
+function isSqlSearchPath(): boolean {
+  const storage = getStorageProvider();
+  if (storage.name !== 'sqlite') return false;
+  return (storage as SqliteStorageProvider).hasFtsData();
+}
+
+/**
+ * Get or generate embedding, using storage-backed cache for SQLite.
+ */
+async function getCachedEmbedding(
+  embeddableText: string,
+  provider: EmbeddingProvider,
+): Promise<number[] | null> {
+  if (provider.dimensions() <= 0) return null;
+
+  const storage = getStorageProvider();
+  const hash = contentHash(embeddableText);
+  const providerName = provider.name;
+  const model = provider.modelName();
+
+  // Check storage-backed cache (SQLite)
+  if (storage.name === 'sqlite') {
+    const cached = await storage.getEmbedding(hash, providerName, model);
+    if (cached) {
+      return bufferToEmbedding(cached);
+    }
+  }
+
+  // Check in-memory cache
+  const memKey = `${hash}:${providerName}:${model}`;
+  if (embeddingCache.has(memKey)) {
+    return embeddingCache.get(memKey)!;
+  }
+
+  // Generate new embedding
+  try {
+    const embedding = await provider.embed(embeddableText);
+
+    // Store in both caches
+    if (storage.name === 'sqlite') {
+      await storage.putEmbedding(hash, providerName, model, embedding.length, embeddingToBuffer(embedding));
+    }
+    embeddingCache.set(memKey, embedding);
+
+    return embedding;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build embeddable text from item fields.
+ */
+function buildEmbeddableText(validated: L2Item, name: string, tags: string[]): string {
+  return getEmbeddableText({
+    name,
+    summary: (validated as { summary?: string }).summary,
+    content: (validated as { content?: string }).content,
+    context: (validated as { context?: string }).context,
+    focus: (validated as { focus?: string }).focus,
+    highlights: (validated as { highlights?: string[] }).highlights,
+    aliases: (validated as { aliases?: string[] }).aliases,
+    tags,
+  });
+}
+
+/**
+ * Load the L2 index from disk.
+ * Handles both encrypted and unencrypted formats for automatic migration.
+ */
+export async function loadIndex(): Promise<L2Index> {
+  try {
+    const storage = getStorageProvider();
+    const buffer = await storage.readL2Index();
+
+    if (!buffer) {
+      return { version: 1, updated_at: new Date().toISOString(), entries: [] };
+    }
+
+    let parsed = JSON.parse(buffer.toString('utf-8'));
+
+    // Handle encrypted index
+    if (isEncryptedPayload(parsed)) {
+      const cryptoProvider = getDefaultCryptoProvider();
+      if (!cryptoProvider.isUnlocked()) {
+        throw new Error('Cannot read encrypted L2 index: encryption not configured');
+      }
+      const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
+      parsed = JSON.parse(decrypted.toString('utf-8'));
+    }
+
+    return L2IndexSchema.parse(parsed);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // Return empty index if file doesn't exist
+      return { version: 1, updated_at: new Date().toISOString(), entries: [] };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Save the L2 index to disk.
+ * Embeddings are stripped before persistence and cached in memory.
+ * This prevents semantic fingerprint leakage in stored index.
+ */
+export async function saveIndex(index: L2Index): Promise<void> {
+  // Cache embeddings before stripping
+  for (const entry of index.entries) {
+    if (entry.embedding?.length) {
+      embeddingCache.set(entry.id, entry.embedding);
+    }
+  }
+
+  // Strip embeddings for persistence
+  const entriesWithoutEmbeddings = index.entries.map(({ embedding: _embedding, ...rest }) => rest);
+
+  const validated = L2IndexSchema.parse({
+    ...index,
+    entries: entriesWithoutEmbeddings,
+    updated_at: new Date().toISOString(),
+  });
+
+  // Encrypt index if crypto provider is unlocked
+  const cryptoProvider = getDefaultCryptoProvider();
+  let fileContent: string;
+
+  if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
+    const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
+    const encrypted = await cryptoProvider.encrypt(plaintext);
+    fileContent = JSON.stringify(encrypted, null, 2);
+  } else {
+    fileContent = JSON.stringify(validated, null, 2);
+  }
+
+  const storage = getStorageProvider();
+  await storage.writeL2Index(Buffer.from(fileContent, 'utf-8'));
+}
+
+/**
+ * Extract keywords from text for indexing.
+ * Simple tokenization - splits on whitespace and punctuation, lowercases, dedupes.
+ */
+function extractKeywords(text: string): string[] {
+  const words = text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+  return [...new Set(words)];
+}
+
+/**
+ * Get embedding for an entry, from cache or by regenerating (legacy path).
+ */
+async function getEmbedding(entry: L2IndexEntry, embeddingProvider: EmbeddingProvider): Promise<number[] | null> {
+  // Check in-memory cache first
+  if (embeddingCache.has(entry.id)) {
+    return embeddingCache.get(entry.id)!;
+  }
+
+  // Check if persisted in entry (legacy, before stripping)
+  if (entry.embedding?.length) {
+    embeddingCache.set(entry.id, entry.embedding);
+    return entry.embedding;
+  }
+
+  // Lazy regenerate if provider available
+  if (embeddingProvider.dimensions() > 0) {
+    try {
+      const item = await readItem(entry.id);
+      if (item) {
+        const embeddableText = getEmbeddableText({
+          name: (item as { name?: string }).name,
+          summary: (item as { summary?: string }).summary,
+          content: (item as { content?: string }).content,
+          context: (item as { context?: string }).context,
+          focus: (item as { focus?: string }).focus,
+          highlights: (item as { highlights?: string[] }).highlights,
+          aliases: (item as { aliases?: string[] }).aliases,
+          tags: (item as { tags?: string[] }).tags,
+        });
+        const embedding = await embeddingProvider.embed(embeddableText);
+        embeddingCache.set(entry.id, embedding);
+        return embedding;
+      }
+    } catch {
+      // Continue without embedding
+    }
+  }
+
+  return null;
+}
+
+/**
+ * SQL search path: FTS5 BM25 + optional sqlite-vec cosine similarity.
+ * 70/30 semantic/keyword weighting when both are available.
+ */
+async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
+  const { query, type, tags, limit = 20, semantic = true } = options;
+  const storage = getStorageProvider() as SqliteStorageProvider;
+  const index = await loadIndex();
+
+  // Build lookup map from blob index for metadata
+  const entryMap = new Map<string, L2IndexEntry>();
+  for (const entry of index.entries) {
+    entryMap.set(entry.id, entry);
+  }
+
+  // No query: return all matching type/tags from blob index (same as legacy)
+  if (!query) {
+    let results: SearchResult[] = [];
+    for (const entry of index.entries) {
+      if (type && entry.type !== type) continue;
+      if (tags && tags.length > 0) {
+        const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
+        if (!hasMatchingTag) continue;
+      }
+      results.push({
+        id: entry.id,
+        type: entry.type,
+        subtype: entry.subtype,
+        name: entry.name,
+        tags: entry.tags,
+        path: entry.path,
+        score: 1,
+      });
+    }
+    results = results.slice(0, limit);
+    for (const r of results) await storage.recordAccess(r.id);
+    return results;
+  }
+
+  // FTS5 BM25 keyword search
+  const ftsResults = await storage.ftsSearch(query, limit * 3); // over-fetch for merging
+  const ftsScores = new Map<string, number>();
+  // FTS5 rank is negative (lower = better). Normalize to 0-1.
+  const maxAbsRank = ftsResults.length > 0
+    ? Math.max(...ftsResults.map((r) => Math.abs(r.rank)), 1)
+    : 1;
+  for (const r of ftsResults) {
+    ftsScores.set(r.item_id, Math.abs(r.rank) / maxAbsRank);
+  }
+
+  // Semantic search
+  const provider = getDefaultProvider();
+  const useVec = semantic && storage.vecAvailable() && provider.dimensions() > 0;
+  const useInMemoryCosine = semantic && !storage.vecAvailable() && provider.dimensions() > 0;
+
+  const vecScores = new Map<string, number>();
+  let queryEmbedding: number[] | null = null;
+
+  if (useVec || useInMemoryCosine) {
+    try {
+      queryEmbedding = await provider.embed(query);
+    } catch {
+      queryEmbedding = null;
+    }
+  }
+
+  if (useVec && queryEmbedding) {
+    // sqlite-vec cosine distance search
+    const vecResults = await storage.vecSearch(toFloat32Array(queryEmbedding), limit * 3);
+    for (const r of vecResults) {
+      // sqlite-vec returns distance (lower = more similar). Convert to similarity.
+      vecScores.set(r.item_id, Math.max(0, 1 - r.distance));
+    }
+  } else if (useInMemoryCosine && queryEmbedding) {
+    // Fallback: in-memory cosine using cached embeddings
+    for (const entry of index.entries) {
+      const embedding = await getEmbedding(entry, provider);
+      if (embedding?.length) {
+        const sim = cosineSimilarity(queryEmbedding, embedding);
+        if (sim > 0) {
+          vecScores.set(entry.id, sim);
+        }
+      }
+    }
+  }
+
+  const hasSemanticScores = vecScores.size > 0;
+
+  // Merge candidates from both FTS and vec
+  const candidateIds = new Set<string>([...ftsScores.keys(), ...vecScores.keys()]);
+
+  const results: SearchResult[] = [];
+  for (const id of candidateIds) {
+    const entry = entryMap.get(id);
+    if (!entry) continue;
+
+    // Type filter
+    if (type && entry.type !== type) continue;
+
+    // Tag filter
+    if (tags && tags.length > 0) {
+      const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
+      if (!hasMatchingTag) continue;
+    }
+
+    const kw = ftsScores.get(id) || 0;
+    const sem = vecScores.get(id) || 0;
+
+    // 70/30 semantic/keyword when semantic available, otherwise keyword only
+    const score = hasSemanticScores
+      ? sem * 0.7 + kw * 0.3
+      : kw;
+
+    if (score === 0) continue;
+
+    results.push({
+      id: entry.id,
+      type: entry.type,
+      subtype: entry.subtype,
+      name: entry.name,
+      tags: entry.tags,
+      path: entry.path,
+      score,
+    });
+  }
+
+  results.sort((a, b) => b.score - a.score);
+  const finalResults = results.slice(0, limit);
+
+  for (const r of finalResults) await storage.recordAccess(r.id);
+
+  return finalResults;
+}
+
+/**
+ * Legacy search path: in-memory keyword + optional cosine similarity.
+ * Used for JSON provider or when FTS5 is not populated.
+ */
+async function searchLegacy(options: SearchOptions): Promise<SearchResult[]> {
+  const { query, type, tags, limit = 20, semantic = true } = options;
+  const index = await loadIndex();
+
+  const provider = getDefaultProvider();
+  const hasEmbeddings = index.entries.some((e) => e.embedding?.length || embeddingCache.has(e.id));
+  const canGenerateEmbeddings = provider.dimensions() > 0;
+  const useSemanticSearch = semantic && query && (hasEmbeddings || canGenerateEmbeddings);
+
+  let queryEmbedding: number[] | null = null;
+  if (useSemanticSearch) {
+    try {
+      queryEmbedding = await provider.embed(query);
+    } catch {
+      queryEmbedding = null;
+    }
+  }
+
+  const results: SearchResult[] = [];
+
+  for (const entry of index.entries) {
+    if (type && entry.type !== type) continue;
+
+    if (tags && tags.length > 0) {
+      const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
+      if (!hasMatchingTag) continue;
+    }
+
+    let keywordScore = 0;
+    let semanticScore = 0;
+
+    if (query) {
+      const queryLower = query.toLowerCase();
+      const queryWords = extractKeywords(query);
+
+      if (entry.name.toLowerCase().includes(queryLower)) {
+        keywordScore += 10;
+      }
+
+      for (const word of queryWords) {
+        if (entry.keywords.includes(word)) keywordScore += 1;
+        if (entry.tags.includes(word)) keywordScore += 2;
+      }
+
+      if (queryEmbedding) {
+        const entryEmbedding = await getEmbedding(entry, provider);
+        if (entryEmbedding?.length) {
+          semanticScore = cosineSimilarity(queryEmbedding, entryEmbedding);
+        }
+      }
+
+      const normalizedKeyword = Math.min(keywordScore / 15, 1);
+      const combinedScore = queryEmbedding
+        ? semanticScore * 0.7 + normalizedKeyword * 0.3
+        : keywordScore;
+
+      if (combinedScore === 0 && keywordScore === 0) continue;
+
+      results.push({
+        id: entry.id,
+        type: entry.type,
+        subtype: entry.subtype,
+        name: entry.name,
+        tags: entry.tags,
+        path: entry.path,
+        score: queryEmbedding ? combinedScore : keywordScore,
+      });
+    } else {
+      results.push({
+        id: entry.id,
+        type: entry.type,
+        subtype: entry.subtype,
+        name: entry.name,
+        tags: entry.tags,
+        path: entry.path,
+        score: 1,
+      });
+    }
+  }
+
+  results.sort((a, b) => b.score - a.score);
+
+  const finalResults = results.slice(0, limit);
+
+  const storage = getStorageProvider();
+  for (const result of finalResults) {
+    await storage.recordAccess(result.id);
+  }
+
+  return finalResults;
+}
+
+/**
+ * Search the L2 index by keyword, type, and/or tags.
+ * Automatically selects SQL path (FTS5 + sqlite-vec) or legacy path.
+ */
+export async function search(options: SearchOptions): Promise<SearchResult[]> {
+  if (isSqlSearchPath()) {
+    return searchSql(options);
+  }
+  return searchLegacy(options);
+}
+
+/**
+ * Get the file path for an item.
+ */
+function _getItemPath(type: L2ItemType, id: string): string {
+  const subdir = type === 'entity' ? 'entities' : type === 'session' ? 'sessions' : 'learnings';
+  return path.join(L2_ROOT, subdir, `${id}.json`);
+}
+
+/**
+ * Read a specific L2 item by ID.
+ * Handles decryption if the item is encrypted.
+ */
+export async function readItem(id: string): Promise<L2Item | null> {
+  const index = await loadIndex();
+  const entry = index.entries.find((e) => e.id === id);
+
+  if (!entry) {
+    return null;
+  }
+
+  const storage = getStorageProvider();
+
+  try {
+    const stored = await storage.readL2Item(id);
+
+    if (!stored) {
+      return null;
+    }
+
+    let parsed = JSON.parse(stored.data.toString('utf-8'));
+
+    // Handle encrypted items
+    if (isEncryptedPayload(parsed)) {
+      const cryptoProvider = getDefaultCryptoProvider();
+      if (!cryptoProvider.isUnlocked()) {
+        throw new Error('Cannot read encrypted item: encryption not configured');
+      }
+      const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
+      parsed = JSON.parse(decrypted.toString('utf-8'));
+    }
+
+    // Record access (no-op for JSON provider, increments for SQLite)
+    await storage.recordAccess(id);
+
+    // Validate based on type
+    switch (entry.type) {
+      case 'entity':
+        return L2EntitySchema.parse(parsed);
+      case 'session':
+        return L2SessionSchema.parse(parsed);
+      case 'learning':
+        return L2LearningSchema.parse(parsed);
+      default:
+        return null;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Generate a unique ID.
+ */
+function generateId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Extract item name from validated data.
+ */
+function extractName(type: L2ItemType, validated: L2Item): string {
+  return (validated as { name?: string }).name
+    || (validated as L2Session).focus
+    || (validated as L2Learning).content.slice(0, 50);
+}
+
+/**
+ * Build keyword source text from validated item.
+ */
+function buildKeywordSources(validated: L2Item, name: string): string {
+  return [
+    name,
+    (validated as { summary?: string }).summary || '',
+    (validated as { content?: string }).content || '',
+    (validated as { context?: string }).context || '',
+    ...(validated as { highlights?: string[] }).highlights || [],
+    ...(validated as { aliases?: string[] }).aliases || [],
+  ].join(' ');
+}
+
+/**
+ * Write an L2 item (create or update).
+ * Updates blob index, FTS5, embedding cache, and vec table.
+ */
+export interface WriteItemOptions {
+  group_id?: string;
+  entity_id?: string;
+}
+
+export async function writeItem(
+  type: L2ItemType,
+  data: Partial<L2Item>,
+  options: WriteItemOptions = {},
+): Promise<{ success: true; id: string; ttl_expires?: string } | { error: string }> {
+  const now = new Date().toISOString();
+  const id = (data as { id?: string }).id || generateId();
+
+  let validated: L2Item;
+  let subtype: string | undefined;
+
+  try {
+    switch (type) {
+      case 'entity': {
+        validated = L2EntitySchema.parse({
+          ...data,
+          id,
+          created_at: (data as L2Entity).created_at || now,
+          updated_at: now,
+        });
+        subtype = (validated as L2Entity).type;
+        break;
+      }
+      case 'session': {
+        validated = L2SessionSchema.parse({
+          ...data,
+          id,
+        });
+        break;
+      }
+      case 'learning': {
+        validated = L2LearningSchema.parse({
+          ...data,
+          id,
+          created_at: (data as L2Learning).created_at || now,
+        });
+        subtype = (validated as L2Learning).type;
+        break;
+      }
+      default:
+        return { error: `unknown_type: ${type}` };
+    }
+  } catch (e) {
+    return { error: `validation_failed: ${(e as Error).message}` };
+  }
+
+  // Determine file path (still used for index entry)
+  const subdir = type === 'entity' ? 'entities' : type === 'session' ? 'sessions' : 'learnings';
+  const relativePath = `${subdir}/${id}.json`;
+
+  // Encrypt if crypto provider is unlocked
+  const cryptoProvider = getDefaultCryptoProvider();
+  let fileContent: string;
+
+  if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
+    const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
+    const encrypted = await cryptoProvider.encrypt(plaintext);
+    fileContent = JSON.stringify(encrypted, null, 2);
+  } else {
+    fileContent = JSON.stringify(validated, null, 2);
+  }
+
+  // Write via storage provider
+  const storage = getStorageProvider();
+  const meta: import('./storage.js').L2ItemMeta = {
+    type: type as 'entity' | 'session' | 'learning',
+    owner_id: options.entity_id,
+    visibility: options.group_id ? 'group' : 'private',
+    group_id: options.group_id,
+    author_id: options.entity_id,
+  };
+  await storage.writeL2Item(id, type, Buffer.from(fileContent, 'utf-8'), meta);
+
+  // Apply group culture TTL if writing to a group (R3-011)
+  let ttlExpires: string | undefined;
+  if (options.group_id) {
+    const culture = await getGroupCulture(options.group_id);
+    if (culture?.ttl_default && culture.ttl_default > 0) {
+      ttlExpires = new Date(Date.now() + culture.ttl_default * 1000).toISOString();
+    }
+  }
+
+  // Update blob index
+  const index = await loadIndex();
+  const existingIdx = index.entries.findIndex((e) => e.id === id);
+
+  const name = extractName(type, validated);
+  const tags = (validated as { tags?: string[] }).tags || [];
+  const keywordSources = buildKeywordSources(validated, name);
+  const lowerTags = tags.map((t) => t.toLowerCase());
+
+  // Generate embedding
+  let embedding: number[] | undefined;
+  const provider = getDefaultProvider();
+  if (provider.dimensions() > 0) {
+    const embeddableText = buildEmbeddableText(validated, name, tags);
+    const cached = await getCachedEmbedding(embeddableText, provider);
+    if (cached) embedding = cached;
+  }
+
+  const indexEntry: L2IndexEntry = {
+    id,
+    type,
+    subtype,
+    name,
+    tags: lowerTags,
+    keywords: extractKeywords(keywordSources),
+    path: relativePath,
+    embedding,
+    visibility: options.group_id ? 'group' : 'private',
+  };
+
+  if (existingIdx >= 0) {
+    index.entries[existingIdx] = indexEntry;
+  } else {
+    index.entries.push(indexEntry);
+  }
+
+  await saveIndex(index);
+
+  // Update FTS5 and vec tables (no-op for JSON provider)
+  await storage.ftsUpsert(id, name, keywordSources, lowerTags.join(' '));
+
+  if (embedding && storage.vecAvailable()) {
+    await storage.vecUpsert(id, toFloat32Array(embedding));
+  }
+
+  const result: { success: true; id: string; ttl_expires?: string } = { success: true, id };
+  if (ttlExpires) result.ttl_expires = ttlExpires;
+  return result;
+}
+
+/**
+ * Delete an L2 item by ID.
+ * Removes from storage, blob index, FTS, vec, and embedding cache.
+ */
+export async function deleteItem(id: string): Promise<{ success: true; id: string } | { error: string }> {
+  const index = await loadIndex();
+  const entryIdx = index.entries.findIndex((e) => e.id === id);
+
+  if (entryIdx === -1) {
+    return { error: 'not_found' };
+  }
+
+  const storage = getStorageProvider();
+  await storage.deleteL2Item(id);
+
+  // Remove from blob index
+  index.entries.splice(entryIdx, 1);
+  embeddingCache.delete(id);
+
+  await saveIndex(index);
+
+  // Remove from FTS and vec (no-op for JSON provider)
+  await storage.ftsDelete(id);
+  await storage.vecDelete(id);
+
+  return { success: true, id };
+}
+
+/**
+ * Share a private memory to a group (COW copy).
+ * The original is never modified. A new row is created with parent_id pointing to the original.
+ */
+export async function shareItem(
+  itemId: string,
+  targetGroup: string,
+  entityId: string,
+): Promise<{ success: true; copy_id: string } | { error: string }> {
+  const storage = getStorageProvider();
+
+  // Read original item metadata
+  const meta = await storage.readL2ItemMeta(itemId);
+  if (!meta) {
+    return { error: 'not_found' };
+  }
+
+  // Policy check: entity must be the owner of the item
+  if (meta.owner_id !== entityId) {
+    return { error: 'not_owner' };
+  }
+
+  // Policy check: entity must be a member of the target group (non-viewer, non-EMCON)
+  const membership = await storage.getMembership(targetGroup, entityId);
+  if (!membership) {
+    return { error: 'not_member' };
+  }
+  if (membership.role === 'viewer') {
+    return { error: 'viewer_cannot_share' };
+  }
+  if (membership.posture === 'emcon') {
+    return { error: 'emcon_blocks_share' };
+  }
+
+  // Read original data
+  const original = await storage.readL2Item(itemId);
+  if (!original) {
+    return { error: 'not_found' };
+  }
+
+  // Generate new ID for COW copy
+  const copyId = generateId();
+  const subdir = original.type === 'entity' ? 'entities' : original.type === 'session' ? 'sessions' : 'learnings';
+  const relativePath = `${subdir}/${copyId}.json`;
+
+  // Write COW copy
+  await storage.writeL2Item(copyId, original.type, original.data, {
+    type: original.type as 'entity' | 'session' | 'learning',
+    owner_id: meta.owner_id,
+    author_id: entityId,
+    visibility: 'group',
+    group_id: targetGroup,
+    parent_id: itemId,
+    is_copy: true,
+    key_version: 1,
+  });
+
+  // Update L2 index with copy entry
+  const index = await loadIndex();
+  const originalEntry = index.entries.find((e) => e.id === itemId);
+  if (originalEntry) {
+    index.entries.push({
+      ...originalEntry,
+      id: copyId,
+      path: relativePath,
+      visibility: 'group',
+    });
+    await saveIndex(index);
+  }
+
+  // Upsert FTS for copy
+  if (originalEntry) {
+    const name = originalEntry.name;
+    const tags = originalEntry.tags.join(' ');
+    const keywords = originalEntry.keywords.join(' ');
+    await storage.ftsUpsert(copyId, name, keywords, tags);
+  }
+
+  // Log to access_log
+  await storage.logAccess({
+    entity_id: entityId,
+    action: 'share',
+    resource_type: original.type,
+    resource_id: itemId,
+    group_id: targetGroup,
+    detail: `shared as ${copyId} (COW copy)`,
+  });
+
+  return { success: true, copy_id: copyId };
+}
+
+/**
+ * Prefetch top L2 items for faster session start (R3-012).
+ * Returns most recently accessed items from user's groups + private memory.
+ * Context-aware: if a binding exists for cwd, prioritize bound group's items.
+ */
+export async function prefetchItems(
+  entityId: string,
+  options: {
+    cwd?: string;
+    bindings?: Record<string, string>;
+    limit?: number;
+  } = {},
+): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null }>> {
+  const storage = getStorageProvider();
+  if (storage.name !== 'sqlite') return [];
+
+  const limit = options.limit || 10;
+
+  // Get all groups this entity belongs to
+  const allGroups = await storage.listGroups();
+  const memberGroups: string[] = [];
+  for (const g of allGroups) {
+    const m = await storage.getMembership(g.id, entityId);
+    if (m) memberGroups.push(g.id);
+  }
+
+  // If context binding exists, prioritize bound group
+  let boundGroupId: string | undefined;
+  if (options.cwd && options.bindings) {
+    // Import dynamically to avoid circular deps at module level
+    const { resolveContextBinding } = await import('./policy.js');
+    boundGroupId = resolveContextBinding(options.cwd, options.bindings);
+  }
+
+  if (boundGroupId) {
+    // Fetch bound group items first, then fill remaining from other groups
+    const boundItems = await storage.getRecentItems(entityId, [boundGroupId], limit);
+    if (boundItems.length >= limit) return boundItems;
+
+    const remaining = limit - boundItems.length;
+    const otherGroups = memberGroups.filter(g => g !== boundGroupId);
+    const otherItems = await storage.getRecentItems(entityId, otherGroups, remaining);
+    return [...boundItems, ...otherItems];
+  }
+
+  return storage.getRecentItems(entityId, memberGroups, limit);
+}
+
+/**
+ * Sweep expired items from groups with TTL.
+ * Items where last_accessed_at is older than group TTL are deleted.
+ * Items that have never been accessed use created_at as the reference.
+ */
+export async function sweepExpiredItems(): Promise<{ swept: number }> {
+  const storage = getStorageProvider();
+  if (storage.name !== 'sqlite') return { swept: 0 };
+
+  const groups = await storage.listGroups();
+  let swept = 0;
+
+  for (const group of groups) {
+    let culture: { ttl_default?: number | null } = {};
+    try {
+      culture = JSON.parse(group.culture);
+    } catch {
+      continue;
+    }
+
+    if (!culture.ttl_default || culture.ttl_default <= 0) continue;
+
+    const ttlSeconds = culture.ttl_default;
+    const items = await storage.listGroupItems(group.id, 10000);
+
+    for (const item of items) {
+      const stats = await storage.getAccessStats(item.id);
+      if (!stats) continue;
+
+      // Use last_accessed_at if available, otherwise fall back to checking if item is old enough
+      const refTime = stats.last_accessed_at;
+      if (!refTime) {
+        // Never accessed -- check created_at via meta
+        const itemMeta = await storage.readL2ItemMeta(item.id);
+        if (!itemMeta) continue;
+        // For never-accessed items, they'll have access_count=0. Skip them on first sweep.
+        // They get a grace period -- only swept if they exist in the group but are never accessed.
+        if (stats.access_count === 0) continue;
+      }
+
+      if (refTime) {
+        const lastAccess = new Date(refTime + 'Z').getTime();
+        const now = Date.now();
+        const ageSec = (now - lastAccess) / 1000;
+        if (ageSec > ttlSeconds) {
+          await deleteItem(item.id);
+          swept++;
+        }
+      }
+    }
+  }
+
+  return { swept };
+}
+
+/**
+ * Rebuild the index by scanning all files.
+ * Populates blob index, FTS5, and vec tables.
+ * Optionally re-encrypts unencrypted items if crypto is enabled.
+ */
+export async function rebuildIndex(options?: { reencrypt?: boolean }): Promise<{ success: true; count: number; encrypted?: number } | { error: string }> {
+  const entries: L2IndexEntry[] = [];
+  const subdirs: Array<{ dir: string; type: L2ItemType }> = [
+    { dir: 'entities', type: 'entity' },
+    { dir: 'sessions', type: 'session' },
+    { dir: 'learnings', type: 'learning' },
+  ];
+  const cryptoProvider = getDefaultCryptoProvider();
+  const shouldEncrypt = options?.reencrypt && cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none';
+  let encryptedCount = 0;
+  const storage = getStorageProvider();
+
+  for (const { dir, type } of subdirs) {
+    const dirPath = path.join(L2_ROOT, dir);
+
+    try {
+      const files = await fs.readdir(dirPath);
+
+      for (const file of files) {
+        if (!file.endsWith('.json')) continue;
+
+        const filePath = path.join(dirPath, file);
+        try {
+          const content = await fs.readFile(filePath, 'utf-8');
+          let parsed = JSON.parse(content);
+          let wasEncrypted = false;
+
+          // Handle encrypted items
+          if (isEncryptedPayload(parsed)) {
+            if (!cryptoProvider.isUnlocked()) {
+              continue;
+            }
+            const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
+            parsed = JSON.parse(decrypted.toString('utf-8'));
+            wasEncrypted = true;
+          }
+
+          // Validate and extract metadata
+          let validated: L2Item;
+          let subtype: string | undefined;
+
+          switch (type) {
+            case 'entity':
+              validated = L2EntitySchema.parse(parsed);
+              subtype = (validated as L2Entity).type;
+              break;
+            case 'session':
+              validated = L2SessionSchema.parse(parsed);
+              break;
+            case 'learning':
+              validated = L2LearningSchema.parse(parsed);
+              subtype = (validated as L2Learning).type;
+              break;
+          }
+
+          // Re-encrypt unencrypted items if requested
+          if (shouldEncrypt && !wasEncrypted) {
+            const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
+            const encrypted = await cryptoProvider.encrypt(plaintext);
+            await fs.writeFile(filePath, JSON.stringify(encrypted, null, 2), 'utf-8');
+            encryptedCount++;
+          }
+
+          const name = extractName(type, validated);
+          const tags = (validated as { tags?: string[] }).tags || [];
+          const lowerTags = tags.map((t) => t.toLowerCase());
+          const keywordSources = buildKeywordSources(validated, name);
+
+          // Generate/cache embedding
+          let embedding: number[] | undefined;
+          const provider = getDefaultProvider();
+          if (provider.dimensions() > 0) {
+            const embeddableText = buildEmbeddableText(validated, name, tags);
+            const cached = await getCachedEmbedding(embeddableText, provider);
+            if (cached) embedding = cached;
+          }
+
+          const itemId = (validated as { id: string }).id;
+
+          entries.push({
+            id: itemId,
+            type,
+            subtype,
+            name,
+            tags: lowerTags,
+            keywords: extractKeywords(keywordSources),
+            path: `${dir}/${file}`,
+            embedding,
+            visibility: 'private',
+          });
+
+          // Populate FTS5 and vec tables
+          await storage.ftsUpsert(itemId, name, keywordSources, lowerTags.join(' '));
+          if (embedding && storage.vecAvailable()) {
+            await storage.vecUpsert(itemId, toFloat32Array(embedding));
+          }
+        } catch {
+          // Skip invalid files
+        }
+      }
+    } catch {
+      // Directory doesn't exist, skip
+    }
+  }
+
+  const index: L2Index = {
+    version: 1,
+    updated_at: new Date().toISOString(),
+    entries,
+  };
+
+  await saveIndex(index);
+
+  const result: { success: true; count: number; encrypted?: number } = { success: true, count: entries.length };
+  if (shouldEncrypt) {
+    result.encrypted = encryptedCount;
+  }
+  return result;
+}

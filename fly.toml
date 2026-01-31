@@ -1,0 +1,31 @@
+# fly.toml app configuration file generated for cordelia-seed-drill on 2026-01-28T18:24:25Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'cordelia-seed-drill'
+primary_region = 'lhr'
+
+[build]
+
+[http_service]
+  internal_port = 3847
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[mounts]
+  source = 'cordelia_data'
+  destination = '/data'
+
+[env]
+  CORDELIA_MEMORY_ROOT = '/data/memory'
+  CORDELIA_STORAGE = 'sqlite'
+
+[[vm]]
+  memory = '256mb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256

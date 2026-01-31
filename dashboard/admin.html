@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cordelia - Admin</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <style>
+    .admin-container {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+
+    .admin-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 2rem;
+    }
+
+    .admin-header h2 {
+      color: var(--color-deep-green);
+      margin: 0;
+    }
+
+    .stats-row {
+      display: flex;
+      gap: 1.5rem;
+      margin-bottom: 2rem;
+    }
+
+    .stat-card {
+      background: white;
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 1.25rem;
+      flex: 1;
+      text-align: center;
+    }
+
+    .stat-card .count {
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--color-deep-green);
+    }
+
+    .stat-card .label {
+      font-size: 0.85rem;
+      color: var(--color-muted);
+      text-transform: uppercase;
+    }
+
+    .users-table {
+      width: 100%;
+      background: white;
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      border-collapse: collapse;
+      overflow: hidden;
+    }
+
+    .users-table th,
+    .users-table td {
+      padding: 0.875rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--color-border);
+    }
+
+    .users-table th {
+      background: var(--color-deep-green);
+      color: white;
+      font-weight: 600;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+    }
+
+    .users-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .users-table tr:hover td {
+      background: #f9f9f9;
+    }
+
+    .user-name {
+      font-weight: 600;
+      color: var(--color-charcoal);
+    }
+
+    .user-github {
+      color: var(--color-muted);
+      font-size: 0.85rem;
+    }
+
+    .role-tag {
+      display: inline-block;
+      background: var(--color-deep-green);
+      color: white;
+      padding: 0.15rem 0.5rem;
+      border-radius: 10px;
+      font-size: 0.75rem;
+      margin-right: 0.25rem;
+    }
+
+    .session-count {
+      font-weight: 600;
+      color: var(--color-copper);
+    }
+
+    .error-row {
+      color: var(--color-muted);
+      font-style: italic;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 3rem;
+      color: var(--color-muted);
+    }
+
+    .back-link {
+      color: var(--color-deep-green);
+      text-decoration: none;
+    }
+
+    .back-link:hover {
+      text-decoration: underline;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .logout-btn {
+      padding: 0.4rem 1rem;
+      background-color: var(--color-copper);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Cordelia</h1>
+    <div class="header-actions" id="header-actions">
+      <a href="/" class="back-link">Back to Dashboard</a>
+    </div>
+  </header>
+
+  <main class="admin-container">
+    <div class="admin-header">
+      <h2>Admin Panel</h2>
+    </div>
+
+    <div id="loading" class="loading">Loading...</div>
+
+    <div id="content" style="display: none;">
+      <div class="stats-row">
+        <div class="stat-card">
+          <div class="count" id="user-count">0</div>
+          <div class="label">Users</div>
+        </div>
+        <div class="stat-card">
+          <div class="count" id="entity-count">0</div>
+          <div class="label">Entities</div>
+        </div>
+        <div class="stat-card">
+          <div class="count" id="session-count">0</div>
+          <div class="label">Sessions</div>
+        </div>
+        <div class="stat-card">
+          <div class="count" id="learning-count">0</div>
+          <div class="label">Learnings</div>
+        </div>
+      </div>
+
+      <table class="users-table">
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Organisation</th>
+            <th>Roles</th>
+            <th>Sessions</th>
+            <th>Last Updated</th>
+          </tr>
+        </thead>
+        <tbody id="users-tbody">
+          <!-- Users will be added here -->
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+  <footer>
+    <p>Project Cordelia - Seed Drill</p>
+  </footer>
+
+  <script>
+    const API_BASE = '';
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function formatDate(isoString) {
+      if (!isoString) return 'N/A';
+      const date = new Date(isoString);
+      return date.toLocaleDateString('en-GB', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      });
+    }
+
+    async function checkAuth() {
+      try {
+        const response = await fetch(`${API_BASE}/auth/status`);
+        const data = await response.json();
+
+        if (!data.authenticated) {
+          window.location.href = '/';
+          return null;
+        }
+
+        return data;
+      } catch (error) {
+        console.error('Auth check failed:', error);
+        window.location.href = '/';
+        return null;
+      }
+    }
+
+    async function loadAdminData() {
+      try {
+        const response = await fetch(`${API_BASE}/api/admin/users`);
+
+        if (!response.ok) {
+          throw new Error(`Failed: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+
+        // Update stats
+        document.getElementById('user-count').textContent = data.total_users;
+        document.getElementById('entity-count').textContent = data.l2_stats.entities;
+        document.getElementById('session-count').textContent = data.l2_stats.sessions;
+        document.getElementById('learning-count').textContent = data.l2_stats.learnings;
+
+        // Populate users table
+        const tbody = document.getElementById('users-tbody');
+        tbody.innerHTML = '';
+
+        for (const user of data.users) {
+          const tr = document.createElement('tr');
+
+          if (user.error) {
+            tr.className = 'error-row';
+            tr.innerHTML = `
+              <td colspan="5">${escapeHtml(user.id)} - ${escapeHtml(user.error)}</td>
+            `;
+          } else {
+            const rolesHtml = (user.roles || [])
+              .map(r => `<span class="role-tag">${escapeHtml(r)}</span>`)
+              .join('');
+
+            tr.innerHTML = `
+              <td>
+                <div class="user-name">${escapeHtml(user.name)}</div>
+                ${user.github_id ? `<div class="user-github">@${escapeHtml(user.github_id)}</div>` : ''}
+              </td>
+              <td>${escapeHtml(user.org) || '-'}</td>
+              <td>${rolesHtml || '-'}</td>
+              <td><span class="session-count">${user.session_count || 0}</span></td>
+              <td>${formatDate(user.updated_at)}</td>
+            `;
+          }
+
+          tbody.appendChild(tr);
+        }
+
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('content').style.display = 'block';
+
+      } catch (error) {
+        console.error('Admin load error:', error);
+        document.getElementById('loading').textContent = `Error: ${error.message}`;
+      }
+    }
+
+    async function init() {
+      const auth = await checkAuth();
+      if (!auth) return;
+
+      // Update header with user
+      const headerActions = document.getElementById('header-actions');
+      headerActions.innerHTML = `
+        <span style="font-size: 0.9rem; opacity: 0.9;">@${auth.github_login}</span>
+        <a href="/" class="back-link">Dashboard</a>
+        <button class="logout-btn" onclick="logout()">Logout</button>
+      `;
+
+      loadAdminData();
+    }
+
+    async function logout() {
+      await fetch(`${API_BASE}/auth/logout`, { method: 'POST' });
+      window.location.href = '/';
+    }
+
+    init();
+  </script>
+</body>
+</html>

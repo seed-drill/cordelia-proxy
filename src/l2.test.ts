@@ -1,0 +1,137 @@
+#!/usr/bin/env npx tsx
+/**
+ * L2 Warm Index Tests
+ *
+ * Run: npx tsx src/l2.test.ts
+ */
+
+import * as path from 'path';
+import { initStorageProvider } from './storage.js';
+import * as l2 from './l2.js';
+
+async function test(name: string, fn: () => Promise<void>): Promise<boolean> {
+  try {
+    await fn();
+    console.log(`  PASS: ${name}`);
+    return true;
+  } catch (e) {
+    console.log(`  FAIL: ${name}`);
+    console.log(`        ${(e as Error).message}`);
+    return false;
+  }
+}
+
+function assert(condition: boolean, message: string): void {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+async function runTests(): Promise<void> {
+  // Initialize storage provider before tests
+  const memoryRoot = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory');
+  await initStorageProvider(memoryRoot);
+
+  console.log('\nL2 Warm Index Tests\n' + '='.repeat(40));
+
+  let passed = 0;
+  let failed = 0;
+
+  // Test: Load empty index
+  if (await test('loadIndex returns valid index', async () => {
+    const index = await l2.loadIndex();
+    assert(index.version === 1, 'version should be 1');
+    assert(Array.isArray(index.entries), 'entries should be array');
+  })) passed++; else failed++;
+
+  // Test: Write entity
+  if (await test('writeItem creates entity', async () => {
+    const result = await l2.writeItem('entity', {
+      type: 'person',
+      name: 'Test Person',
+      summary: 'A test person for unit tests',
+      tags: ['test', 'person'],
+    });
+    assert('success' in result && result.success === true, 'should succeed');
+    assert('id' in result && typeof result.id === 'string', 'should return id');
+  })) passed++; else failed++;
+
+  // Test: Write learning
+  if (await test('writeItem creates learning', async () => {
+    const result = await l2.writeItem('learning', {
+      type: 'insight',
+      content: 'Testing is important for reliability',
+      tags: ['testing', 'quality'],
+      confidence: 0.9,
+    });
+    assert('success' in result && result.success === true, 'should succeed');
+  })) passed++; else failed++;
+
+  // Test: Search by query
+  if (await test('search finds by keyword', async () => {
+    const results = await l2.search({ query: 'test' });
+    assert(results.length > 0, 'should find results');
+    assert(results[0].score > 0, 'should have positive score');
+  })) passed++; else failed++;
+
+  // Test: Search by type
+  if (await test('search filters by type', async () => {
+    const entities = await l2.search({ type: 'entity' });
+    const learnings = await l2.search({ type: 'learning' });
+    assert(entities.every((e) => e.type === 'entity'), 'all should be entities');
+    assert(learnings.every((e) => e.type === 'learning'), 'all should be learnings');
+  })) passed++; else failed++;
+
+  // Test: Search by tags
+  if (await test('search filters by tags', async () => {
+    const results = await l2.search({ tags: ['testing'] });
+    assert(results.length > 0, 'should find tagged items');
+  })) passed++; else failed++;
+
+  // Test: Read item
+  if (await test('readItem retrieves written item', async () => {
+    const searchResults = await l2.search({ query: 'Test Person' });
+    assert(searchResults.length > 0, 'should find test person');
+
+    const item = await l2.readItem(searchResults[0].id);
+    assert(item !== null, 'should return item');
+    assert((item as { name: string }).name === 'Test Person', 'should have correct name');
+  })) passed++; else failed++;
+
+  // Test: Encrypted index round-trip
+  if (await test('index encrypts and decrypts correctly', async () => {
+    // Save the index (will encrypt if crypto is enabled)
+    const indexBefore = await l2.loadIndex();
+    const entryCount = indexBefore.entries.length;
+    await l2.saveIndex(indexBefore);
+
+    // Load back and verify data survives the round-trip
+    const indexAfter = await l2.loadIndex();
+    assert(indexAfter.version === 1, 'version should survive round-trip');
+    assert(indexAfter.entries.length === entryCount, `entry count should survive round-trip (expected ${entryCount}, got ${indexAfter.entries.length})`);
+
+    // Verify entries have correct structure
+    for (const entry of indexAfter.entries) {
+      assert(typeof entry.id === 'string' && entry.id.length > 0, 'entry should have id');
+      assert(typeof entry.name === 'string', 'entry should have name');
+      assert(Array.isArray(entry.tags), 'entry should have tags array');
+      assert(Array.isArray(entry.keywords), 'entry should have keywords array');
+    }
+  })) passed++; else failed++;
+
+  // Test: Rebuild index
+  if (await test('rebuildIndex scans files', async () => {
+    const result = await l2.rebuildIndex();
+    assert('success' in result && result.success === true, 'should succeed');
+    assert('count' in result && result.count >= 0, 'should return count');
+  })) passed++; else failed++;
+
+  console.log('\n' + '='.repeat(40));
+  console.log(`Results: ${passed} passed, ${failed} failed\n`);
+
+  if (failed > 0) {
+    process.exit(1);
+  }
+}
+
+runTests().catch(console.error);
