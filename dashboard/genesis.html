@@ -410,7 +410,7 @@
       },
       {
         id: 'github_confirm',
-        message: (data) => `Pleasure to meet you, ${data.name}! I see you've signed in with GitHub as @${data.github_id}. That's how we'll recognise you when you return.`,
+        message: (data) => `Pleasure to meet you, ${data.name}! I see you've signed in as @${data.github_id}. That's how we'll recognise you when you return.`,
         autoAdvance: true,
         delay: 1500,
       },
@@ -811,7 +811,7 @@ Does this look right? Ready to turn it on again?`,
           // Reset and start over
           currentStep = 0;
           userData = {
-            name: '', github_id: authData?.github_login || '', roles: [], org_name: '', org_role: '',
+            name: '', github_id: authData?.username || '', roles: [], org_name: '', org_role: '',
             style: [], key_refs: [], heroes: [], planning_mode: 'important',
             verbosity: 'concise', emoji: false,
           };
@@ -836,7 +836,7 @@ Does this look right? Ready to turn it on again?`,
       addMessage("Ah, a returning soul! Let me generate an API key for you. You can use this to upload your local profile.", 'rutherford');
 
       // First create a bare profile so we have something to attach the API key to
-      userData.name = authData.github_login;
+      userData.name = authData.username;
       userData.org_name = 'independent';
       userData.org_role = 'user';
 
@@ -966,11 +966,11 @@ Once uploaded, refresh this page to see your profile!`, 'rutherford', true);
           return;
         }
 
-        // Show user in header
-        headerUser.innerHTML = `<span style="font-size: 0.9rem; opacity: 0.9;">@${authData.github_login}</span>`;
+        // Show user in header (use username which works for both auth types)
+        headerUser.innerHTML = `<span style="font-size: 0.9rem; opacity: 0.9;">@${authData.username}</span>`;
 
-        // Pre-fill GitHub ID from auth
-        userData.github_id = authData.github_login;
+        // Pre-fill user identifier from auth (github_login for GitHub, username for local)
+        userData.github_id = authData.username;
 
         // Check if user already has a profile
         if (authData.cordelia_user) {

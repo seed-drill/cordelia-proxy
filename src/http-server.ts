@@ -697,6 +697,7 @@ app.post('/api/signup', async (req: Request, res: Response) => {
     const {
       name,
       github_id,
+      username,  // Alternative to github_id for local auth
       roles = [],
       org_name,
       org_role,
@@ -719,13 +720,15 @@ app.post('/api/signup', async (req: Request, res: Response) => {
       return ref.toLowerCase().replace(/[^a-z0-9:]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
     }).filter((ref: string) => /^[a-z_]+:[a-z0-9_]+$/.test(ref));
 
-    if (!name || !github_id) {
-      res.status(400).json({ error: 'Name and GitHub ID are required' });
+    // Accept either github_id or username for user identification
+    const userIdentifier = github_id || username;
+    if (!name || !userIdentifier) {
+      res.status(400).json({ error: 'Name and username (or GitHub ID) are required' });
       return;
     }
 
-    // Generate user ID from GitHub ID
-    const userId = github_id.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    // Generate user ID from identifier
+    const userId = userIdentifier.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
     // Check if user already exists
     const storage = getStorageProvider();
@@ -757,7 +760,7 @@ app.post('/api/signup', async (req: Request, res: Response) => {
         orgs,
         key_refs,
         style,
-        github_id,
+        github_id: github_id || userIdentifier,  // Use github_id if provided, otherwise username
         tz: 'UTC',
       },
       active: {
