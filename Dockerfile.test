@@ -24,8 +24,9 @@ RUN echo '#!/bin/sh' > /usr/local/bin/claude && \
 COPY . /opt/cordelia-proxy
 WORKDIR /opt/cordelia-proxy
 
-# Create a test user
-RUN useradd -m -s /bin/bash testuser
+# Create a test user and give ownership of the project dir
+RUN useradd -m -s /bin/bash testuser && \
+    chown -R testuser:testuser /opt/cordelia-proxy
 
 # Run install.sh as testuser
 USER testuser
