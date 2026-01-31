@@ -193,6 +193,86 @@
       font-family: 'Courier New', monospace;
       font-size: 0.85rem;
     }
+
+    .peer-list-panel {
+      background: white;
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 2rem;
+    }
+
+    .peer-list-panel h3 {
+      margin: 0 0 1rem 0;
+      color: var(--color-deep-green);
+      font-size: 1rem;
+    }
+
+    .peers-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+
+    .peers-table th,
+    .peers-table td {
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+      border-bottom: 1px solid var(--color-border);
+    }
+
+    .peers-table th {
+      background: #f5f5f5;
+      font-weight: 600;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      color: var(--color-muted);
+    }
+
+    .peers-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .peers-table .no-peers {
+      text-align: center;
+      color: var(--color-muted);
+      font-style: italic;
+      padding: 1rem;
+    }
+
+    .peer-state {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 10px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .peer-state.hot {
+      background: var(--color-deep-green);
+      color: white;
+    }
+
+    .peer-state.warm {
+      background: var(--color-copper);
+      color: white;
+    }
+
+    .peer-state.cold {
+      background: #999;
+      color: white;
+    }
+
+    .peer-node-id {
+      font-family: 'Courier New', monospace;
+      font-size: 0.8rem;
+    }
+
+    .peer-groups {
+      font-size: 0.75rem;
+      color: var(--color-muted);
+    }
   </style>
 </head>
 <body>
@@ -256,6 +336,25 @@
           <div class="count" id="network-status">-</div>
           <div class="label">Network</div>
         </div>
+      </div>
+
+      <!-- Peer List -->
+      <div class="peer-list-panel" id="peer-list-panel">
+        <h3>Connected Peers</h3>
+        <table class="peers-table" id="peers-table">
+          <thead>
+            <tr>
+              <th>State</th>
+              <th>Node ID</th>
+              <th>Address</th>
+              <th>RTT</th>
+              <th>Groups</th>
+            </tr>
+          </thead>
+          <tbody id="peers-tbody">
+            <tr><td colspan="5" class="no-peers">No connected peers</td></tr>
+          </tbody>
+        </table>
       </div>
 
       <!-- Memory Stats -->
@@ -398,6 +497,60 @@
       return `${minutes}m`;
     }
 
+    async function loadPeerList() {
+      const tbody = document.getElementById('peers-tbody');
+
+      try {
+        const response = await fetch(`${API_BASE}/api/peers`);
+        const data = await response.json();
+
+        // Update counts
+        document.getElementById('peer-hot').textContent = data.hot ?? '-';
+        document.getElementById('peer-warm').textContent = data.warm ?? '-';
+        document.getElementById('peer-total').textContent = data.total ?? '-';
+
+        if (data.error) {
+          document.getElementById('network-status').textContent = 'Offline';
+          document.getElementById('network-status').style.color = '#999';
+        } else if (data.total > 0) {
+          document.getElementById('network-status').textContent = 'Online';
+          document.getElementById('network-status').style.color = 'var(--color-deep-green)';
+        } else {
+          document.getElementById('network-status').textContent = 'Isolated';
+          document.getElementById('network-status').style.color = 'var(--color-copper)';
+        }
+
+        // Update peer list table
+        if (!data.peers || data.peers.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5" class="no-peers">No connected peers</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = '';
+        for (const peer of data.peers) {
+          const tr = document.createElement('tr');
+          const stateClass = peer.state.toLowerCase();
+          const nodeIdShort = peer.node_id ? peer.node_id.substring(0, 12) + '...' : '-';
+          const rttText = peer.rtt_ms !== null ? `${peer.rtt_ms.toFixed(1)}ms` : '-';
+          const groupsText = peer.groups && peer.groups.length > 0
+            ? peer.groups.join(', ')
+            : '-';
+
+          tr.innerHTML = `
+            <td><span class="peer-state ${stateClass}">${escapeHtml(peer.state)}</span></td>
+            <td class="peer-node-id" title="${escapeHtml(peer.node_id)}">${escapeHtml(nodeIdShort)}</td>
+            <td class="monospace">${escapeHtml(peer.addrs?.[0] || '-')}</td>
+            <td>${rttText}</td>
+            <td class="peer-groups">${escapeHtml(groupsText)}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      } catch (error) {
+        console.error('Peer list error:', error);
+        tbody.innerHTML = '<tr><td colspan="5" class="no-peers">Error loading peers</td></tr>';
+      }
+    }
+
     async function loadPeerData() {
       try {
         const response = await fetch(`${API_BASE}/api/peers`);
@@ -494,9 +647,11 @@
 
       loadAdminData();
       loadCoreStatus();
+      loadPeerList();
 
-      // Refresh core status every 30 seconds
+      // Refresh status every 30 seconds
       setInterval(loadCoreStatus, 30000);
+      setInterval(loadPeerList, 30000);
     }
 
     async function logout() {
