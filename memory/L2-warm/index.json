@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-01-31T20:57:49.959Z",
+  "updated_at": "2026-01-31T21:57:40.691Z",
   "entries": [
     {
       "id": "ml2jjdzf-ya3cn9",
@@ -326,6 +326,25 @@
       "visibility": "private"
     },
     {
+      "id": "ml2uru9w-9q40dn",
+      "type": "entity",
+      "subtype": "person",
+      "name": "Test Person",
+      "tags": [
+        "test",
+        "person"
+      ],
+      "keywords": [
+        "test",
+        "person",
+        "for",
+        "unit",
+        "tests"
+      ],
+      "path": "entities/ml2uru9w-9q40dn.json",
+      "visibility": "private"
+    },
+    {
       "id": "ml2jjet1-2zy1kk",
       "type": "learning",
       "subtype": "insight",
@@ -629,6 +648,24 @@
         "reliability"
       ],
       "path": "learnings/ml2smwis-qkx4tq.json",
+      "visibility": "private"
+    },
+    {
+      "id": "ml2urv62-gs5ntu",
+      "type": "learning",
+      "subtype": "insight",
+      "name": "Testing is important for reliability",
+      "tags": [
+        "testing",
+        "quality"
+      ],
+      "keywords": [
+        "testing",
+        "important",
+        "for",
+        "reliability"
+      ],
+      "path": "learnings/ml2urv62-gs5ntu.json",
       "visibility": "private"
     }
   ]
