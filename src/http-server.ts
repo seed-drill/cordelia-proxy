@@ -42,10 +42,22 @@ const PORT = parseInt(process.env.CORDELIA_HTTP_PORT || '3847', 10);
 const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT || path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory');
 const DASHBOARD_ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'dashboard');
 
-// GitHub OAuth config
+// GitHub OAuth config (optional)
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const SESSION_SECRET = process.env.CORDELIA_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
+// Local username/password auth (optional, format: "user1:pass1,user2:pass2")
+const LOCAL_USERS_RAW = process.env.CORDELIA_LOCAL_USERS || '';
+const LOCAL_USERS = new Map<string, string>();
+if (LOCAL_USERS_RAW) {
+  for (const pair of LOCAL_USERS_RAW.split(',')) {
+    const [username, password] = pair.split(':');
+    if (username && password) {
+      LOCAL_USERS.set(username.trim(), password.trim());
+    }
+  }
+}
 
 // API key for CLI uploads (optional, set via CORDELIA_API_KEY)
 const _API_KEY = process.env.CORDELIA_API_KEY;
@@ -68,8 +80,17 @@ function getBaseUrl(): string {
 const BASE_URL = getBaseUrl();
 const CALLBACK_URL = `${BASE_URL}/auth/github/callback`;
 
+// Session type supports both GitHub OAuth and local auth
+interface Session {
+  auth_type: 'github' | 'local';
+  username: string;           // github_login or local username
+  github_id?: string;         // only for GitHub auth
+  cordelia_user: string | null;
+  expires: number;
+}
+
 // Simple in-memory session store (for production, use Redis or similar)
-const sessions = new Map<string, { github_id: string; github_login: string; cordelia_user: string | null; expires: number }>();
+const sessions = new Map<string, Session>();
 
 const app = express();
 app.use(cors());
@@ -143,7 +164,7 @@ async function findUserByGitHub(githubLogin: string): Promise<string | null> {
 /**
  * Get session from cookie.
  */
-function getSession(req: Request): { github_id: string; github_login: string; cordelia_user: string | null } | null {
+function getSession(req: Request): Session | null {
   const sessionId = req.signedCookies?.cordelia_session;
   if (!sessionId) return null;
 
@@ -159,15 +180,33 @@ function getSession(req: Request): { github_id: string; github_login: string; co
 }
 
 /**
- * Create a new session.
+ * Create a new session for GitHub auth.
  */
-function createSession(githubId: string, githubLogin: string, cordeliaUser: string | null): string {
+function createGitHubSession(githubId: string, githubLogin: string, cordeliaUser: string | null): string {
   const sessionId = crypto.randomBytes(32).toString('hex');
   const expires = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
 
   sessions.set(sessionId, {
+    auth_type: 'github',
+    username: githubLogin,
     github_id: githubId,
-    github_login: githubLogin,
+    cordelia_user: cordeliaUser,
+    expires,
+  });
+
+  return sessionId;
+}
+
+/**
+ * Create a new session for local auth.
+ */
+function createLocalSession(username: string, cordeliaUser: string | null): string {
+  const sessionId = crypto.randomBytes(32).toString('hex');
+  const expires = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+
+  sessions.set(sessionId, {
+    auth_type: 'local',
+    username,
     cordelia_user: cordeliaUser,
     expires,
   });
@@ -186,14 +225,64 @@ app.get('/auth/status', (req: Request, res: Response) => {
   const session = getSession(req);
 
   if (!session) {
-    res.json({ authenticated: false });
+    res.json({
+      authenticated: false,
+      github_enabled: !!GITHUB_CLIENT_ID,
+      local_enabled: LOCAL_USERS.size > 0,
+    });
     return;
   }
 
   res.json({
     authenticated: true,
-    github_login: session.github_login,
+    auth_type: session.auth_type,
+    username: session.username,
+    github_login: session.auth_type === 'github' ? session.username : undefined,
     cordelia_user: session.cordelia_user,
+    github_enabled: !!GITHUB_CLIENT_ID,
+    local_enabled: LOCAL_USERS.size > 0,
+  });
+});
+
+/**
+ * POST /auth/login - Username/password login
+ */
+app.post('/auth/login', async (req: Request, res: Response) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    res.status(400).json({ error: 'Username and password required' });
+    return;
+  }
+
+  if (LOCAL_USERS.size === 0) {
+    res.status(403).json({ error: 'Local authentication not configured' });
+    return;
+  }
+
+  const storedPassword = LOCAL_USERS.get(username);
+  if (!storedPassword || storedPassword !== password) {
+    res.status(401).json({ error: 'Invalid username or password' });
+    return;
+  }
+
+  // Find matching Cordelia user
+  const cordeliaUser = await findUserByGitHub(username); // Reuse the same lookup logic
+
+  const sessionId = createLocalSession(username, cordeliaUser);
+
+  res.cookie('cordelia_session', sessionId, {
+    httpOnly: true,
+    secure: BASE_URL.startsWith('https'),
+    signed: true,
+    maxAge: 24 * 60 * 60 * 1000,
+    sameSite: 'lax',
+  });
+
+  res.json({
+    success: true,
+    username,
+    cordelia_user: cordeliaUser,
   });
 });
 
@@ -270,7 +359,7 @@ app.get('/auth/github/callback', async (req: Request, res: Response) => {
     const cordeliaUser = await findUserByGitHub(userData.login);
 
     // Create session
-    const sessionId = createSession(String(userData.id), userData.login, cordeliaUser);
+    const sessionId = createGitHubSession(String(userData.id), userData.login, cordeliaUser);
 
     // Set cookie and redirect to dashboard
     res.cookie('cordelia_session', sessionId, {
@@ -515,7 +604,7 @@ app.put('/api/hot/:userId', async (req: Request, res: Response) => {
       }
 
       // Must be the owner (github_login matches userId or cordelia_user matches)
-      if (session.github_login !== userId && session.cordelia_user !== userId) {
+      if (session.username !== userId && session.cordelia_user !== userId) {
         res.status(403).json({ error: 'forbidden', detail: 'Can only update your own profile' });
         return;
       }
@@ -760,7 +849,7 @@ app.post('/api/profile/:userId/api-key', async (req: Request, res: Response) => 
   }
 
   // Can only generate API key for own profile
-  if (session.github_login !== userId && session.cordelia_user !== userId) {
+  if (session.username !== userId && session.cordelia_user !== userId) {
     res.status(403).json({ error: 'forbidden', detail: 'Can only generate API key for your own profile' });
     return;
   }

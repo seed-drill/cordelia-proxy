@@ -11,6 +11,7 @@ services:
       - CORDELIA_STORAGE=sqlite
       - CORDELIA_ENCRYPTION_KEY=${CORDELIA_ENCRYPTION_KEY}
       - CORDELIA_CORE_API=http://core:9473
+      - CORDELIA_LOCAL_USERS=${CORDELIA_LOCAL_USERS:-admin:admin}
     depends_on:
       - core
     restart: unless-stopped

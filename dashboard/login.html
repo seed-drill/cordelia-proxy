@@ -53,6 +53,8 @@
       font-size: 1rem;
       font-weight: 500;
       transition: background-color 0.2s;
+      width: 100%;
+      box-sizing: border-box;
     }
 
     .github-btn:hover {
@@ -63,6 +65,80 @@
       width: 20px;
       height: 20px;
       fill: currentColor;
+    }
+
+    .divider {
+      display: flex;
+      align-items: center;
+      margin: 1.5rem 0;
+      color: var(--color-muted);
+      font-size: 0.85rem;
+    }
+
+    .divider::before,
+    .divider::after {
+      content: '';
+      flex: 1;
+      border-bottom: 1px solid var(--color-border);
+    }
+
+    .divider::before {
+      margin-right: 1rem;
+    }
+
+    .divider::after {
+      margin-left: 1rem;
+    }
+
+    .login-form {
+      text-align: left;
+    }
+
+    .form-group {
+      margin-bottom: 1rem;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 0.25rem;
+      font-size: 0.85rem;
+      color: var(--color-charcoal);
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 0.75rem;
+      border: 1px solid var(--color-border);
+      border-radius: 6px;
+      font-size: 1rem;
+      box-sizing: border-box;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: var(--color-deep-green);
+    }
+
+    .login-btn {
+      width: 100%;
+      padding: 0.875rem;
+      background-color: var(--color-deep-green);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 1rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+
+    .login-btn:hover {
+      background-color: #1a4a3a;
+    }
+
+    .login-btn:disabled {
+      background-color: #999;
+      cursor: not-allowed;
     }
 
     .login-footer {
@@ -114,6 +190,16 @@
     .skip-link:hover {
       color: var(--color-deep-green);
     }
+
+    .auth-options {
+      display: none;
+    }
+
+    .no-auth-message {
+      color: var(--color-muted);
+      font-style: italic;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -130,12 +216,39 @@
 
       <div id="error-message" class="error-message"></div>
 
-      <a href="/auth/github" class="github-btn">
-        <svg viewBox="0 0 16 16">
-          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-        </svg>
-        Sign in with GitHub
-      </a>
+      <div id="auth-options" class="auth-options">
+        <!-- GitHub OAuth -->
+        <div id="github-auth" style="display: none;">
+          <a href="/auth/github" class="github-btn">
+            <svg viewBox="0 0 16 16">
+              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+            </svg>
+            Sign in with GitHub
+          </a>
+        </div>
+
+        <!-- Divider (shown when both methods available) -->
+        <div id="auth-divider" class="divider" style="display: none;">or</div>
+
+        <!-- Username/Password -->
+        <div id="local-auth" style="display: none;">
+          <form class="login-form" id="login-form">
+            <div class="form-group">
+              <label for="username">Username</label>
+              <input type="text" id="username" name="username" required autocomplete="username">
+            </div>
+            <div class="form-group">
+              <label for="password">Password</label>
+              <input type="password" id="password" name="password" required autocomplete="current-password">
+            </div>
+            <button type="submit" class="login-btn" id="login-btn">Sign In</button>
+          </form>
+        </div>
+      </div>
+
+      <p id="no-auth-message" class="no-auth-message">
+        No authentication methods configured. Contact your administrator.
+      </p>
 
       <a href="/" class="skip-link" id="skip-link" style="display: none;">Continue without login</a>
 
@@ -156,10 +269,89 @@
   <script>
     const API_BASE = '';
 
-    // Redirect to main page - landing/auth handling is now there
-    async function checkAuth() {
-      window.location.href = '/';
+    // Check auth status and configure login options
+    async function init() {
+      try {
+        const response = await fetch(`${API_BASE}/auth/status`);
+        const data = await response.json();
+
+        // If already authenticated, redirect to home
+        if (data.authenticated) {
+          window.location.href = '/';
+          return;
+        }
+
+        const authOptions = document.getElementById('auth-options');
+        const githubAuth = document.getElementById('github-auth');
+        const localAuth = document.getElementById('local-auth');
+        const divider = document.getElementById('auth-divider');
+        const noAuthMessage = document.getElementById('no-auth-message');
+        const skipLink = document.getElementById('skip-link');
+
+        const hasGithub = data.github_enabled;
+        const hasLocal = data.local_enabled;
+
+        if (hasGithub || hasLocal) {
+          authOptions.style.display = 'block';
+
+          if (hasGithub) {
+            githubAuth.style.display = 'block';
+          }
+
+          if (hasLocal) {
+            localAuth.style.display = 'block';
+          }
+
+          if (hasGithub && hasLocal) {
+            divider.style.display = 'flex';
+          }
+        } else {
+          noAuthMessage.style.display = 'block';
+          skipLink.style.display = 'block';
+        }
+      } catch (error) {
+        console.error('Failed to check auth status:', error);
+        document.getElementById('skip-link').style.display = 'block';
+      }
     }
+
+    // Handle login form submission
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+      const btn = document.getElementById('login-btn');
+      const errorEl = document.getElementById('error-message');
+
+      btn.disabled = true;
+      btn.textContent = 'Signing in...';
+      errorEl.style.display = 'none';
+
+      try {
+        const response = await fetch(`${API_BASE}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+          window.location.href = '/';
+        } else {
+          errorEl.textContent = data.error || 'Login failed';
+          errorEl.style.display = 'block';
+          btn.disabled = false;
+          btn.textContent = 'Sign In';
+        }
+      } catch (error) {
+        errorEl.textContent = 'Connection error. Please try again.';
+        errorEl.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Sign In';
+      }
+    });
 
     // Check URL for error parameters
     function checkForErrors() {
@@ -173,25 +365,8 @@
       }
     }
 
-    // Check if GitHub OAuth is configured
-    async function checkOAuthConfig() {
-      try {
-        const response = await fetch(`${API_BASE}/api/status`);
-        const data = await response.json();
-
-        if (!data.auth?.github_configured) {
-          // Show skip link if OAuth not configured
-          document.getElementById('skip-link').style.display = 'block';
-        }
-      } catch (error) {
-        // If status fails, show skip link
-        document.getElementById('skip-link').style.display = 'block';
-      }
-    }
-
-    checkAuth();
     checkForErrors();
-    checkOAuthConfig();
+    init();
   </script>
 </body>
 </html>
