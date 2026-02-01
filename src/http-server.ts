@@ -37,6 +37,12 @@ import {
   type EncryptedPayload,
 } from './crypto.js';
 import { initStorageProvider, getStorageProvider } from './storage.js';
+import { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { registerCordeliaTools } from './mcp-tools.js';
+import { randomUUID } from 'crypto';
 
 const PORT = parseInt(process.env.CORDELIA_HTTP_PORT || '3847', 10);
 const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT || path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory');
@@ -64,6 +70,9 @@ const _API_KEY = process.env.CORDELIA_API_KEY;
 
 // Core node API (optional, for P2P network status)
 const CORDELIA_CORE_API = process.env.CORDELIA_CORE_API;
+
+// --local mode: bind to localhost only, disable auth requirements
+const LOCAL_MODE = process.argv.includes('--local');
 
 // Determine base URL for OAuth callback
 // Priority: CORDELIA_BASE_URL > Fly.io detection > localhost
@@ -1096,6 +1105,106 @@ app.get('/api/docs.json', (_req: Request, res: Response) => {
   res.send(swaggerSpec);
 });
 
+// =============================================================================
+// MCP over SSE/StreamableHTTP Transport
+// =============================================================================
+
+// Active SSE transports keyed by session ID
+const sseTransports: Record<string, SSEServerTransport> = {};
+
+function createMcpServer(): McpServer {
+  const mcpServer = new McpServer(
+    { name: 'cordelia', version: '0.2.0' },
+    { capabilities: { tools: {}, resources: {} } }
+  );
+  registerCordeliaTools(mcpServer);
+  return mcpServer;
+}
+
+/**
+ * GET /api/health - Lightweight health check (no auth required)
+ */
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({ ok: true, mode: LOCAL_MODE ? 'local' : 'remote', version: '0.2.0' });
+});
+
+/**
+ * GET /sse - SSE transport endpoint (2024-11-05 MCP protocol)
+ * Establishes an SSE connection and creates a per-session MCP server.
+ */
+app.get('/sse', async (req: Request, res: Response) => {
+  const transport = new SSEServerTransport('/messages', res);
+  sseTransports[transport.sessionId] = transport;
+
+  res.on('close', () => {
+    delete sseTransports[transport.sessionId];
+  });
+
+  const mcpServer = createMcpServer();
+  await mcpServer.connect(transport);
+});
+
+/**
+ * POST /messages - SSE message endpoint
+ * Routes JSON-RPC messages to the correct SSE transport by sessionId.
+ */
+app.post('/messages', async (req: Request, res: Response) => {
+  const sessionId = req.query.sessionId as string;
+  const transport = sseTransports[sessionId];
+
+  if (!transport) {
+    res.status(400).json({ error: 'No active SSE transport for session', sessionId });
+    return;
+  }
+
+  await transport.handlePostMessage(req, res, req.body);
+});
+
+/**
+ * ALL /mcp - StreamableHTTP transport (2025-03-26 MCP protocol)
+ * Stateful: each initialize request creates a new session.
+ */
+const streamableTransports: Record<string, StreamableHTTPServerTransport> = {};
+
+app.all('/mcp', async (req: Request, res: Response) => {
+  // Handle session-based routing
+  const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+  if (sessionId && streamableTransports[sessionId]) {
+    // Existing session
+    const transport = streamableTransports[sessionId];
+    await transport.handleRequest(req, res, req.body);
+    return;
+  }
+
+  // New session: only accept POST with initialize request
+  if (req.method === 'POST') {
+    const body = req.body;
+    if (isInitializeRequest(body)) {
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+      });
+
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid) delete streamableTransports[sid];
+      };
+
+      const mcpServer = createMcpServer();
+      await mcpServer.connect(transport);
+
+      await transport.handleRequest(req, res, body);
+
+      const sid = transport.sessionId;
+      if (sid) streamableTransports[sid] = transport;
+      return;
+    }
+  }
+
+  // Not an initialize request and no valid session
+  res.status(400).json({ error: 'Bad Request: No valid session. Send an initialize request first.' });
+});
+
 // Serve dashboard static files (after API routes)
 app.use(express.static(DASHBOARD_ROOT));
 
@@ -1134,7 +1243,7 @@ async function initEncryption(): Promise<void> {
  */
 export async function startServer(opts?: { port?: number; host?: string; memoryRoot?: string }): Promise<import('http').Server> {
   const port = opts?.port ?? PORT;
-  const host = opts?.host ?? process.env.HOST ?? '0.0.0.0';
+  const host = opts?.host ?? (LOCAL_MODE ? '127.0.0.1' : (process.env.HOST ?? '0.0.0.0'));
   const memRoot = opts?.memoryRoot ?? MEMORY_ROOT;
 
   const storageProvider = await initStorageProvider(memRoot);

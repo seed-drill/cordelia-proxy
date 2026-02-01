@@ -6,19 +6,21 @@
  * 1. Read transcript_path from stdin (provided by Claude Code)
  * 2. Parse JSONL transcript, extract last N user+assistant messages
  * 3. Run lightweight novelty analysis
- * 4. Persist high-signal items to L1 (notes, blockers)
- * 5. Deduplicate against existing L1 content
+ * 4. Connect MCP client, read/write L1 via memory_read_hot / memory_write_hot
+ * 5. Persist high-signal items to L1 (notes, blockers)
+ * 6. Deduplicate against existing L1 content
  *
  * Timeout: 15s (target: <3s actual)
  * Fallback: Any failure exits 0 - never block compaction
  */
 import * as fs from 'fs/promises';
 import {
-  getEncryptionKey, initCrypto, readL1, writeL1,
+  getEncryptionKey, getMemoryRoot,
   computeContentHash, computeChainHash, getUserId,
 } from './lib.mjs';
+import { ensureServer } from './server-manager.mjs';
+import { createMcpClient, readL1, writeL1 } from './mcp-client.mjs';
 import { analyzeMessages } from './novelty-lite.mjs';
-import { notify } from './recovery.mjs';
 
 const MAX_MESSAGES = 20;
 
@@ -31,7 +33,6 @@ async function readStdin() {
     process.stdin.setEncoding('utf-8');
     process.stdin.on('data', (chunk) => { data += chunk; });
     process.stdin.on('end', () => resolve(data.trim()));
-    // If stdin is already ended or not piped
     setTimeout(() => resolve(data.trim()), 1000);
   });
 }
@@ -54,9 +55,7 @@ async function extractRecentMessages(transcriptPath) {
   for (const line of lines) {
     try {
       const entry = JSON.parse(line);
-      // Claude Code transcript format: each line is a message object
       if (entry.role === 'user' || entry.role === 'assistant') {
-        // Content can be string or array of content blocks
         let text = '';
         if (typeof entry.content === 'string') {
           text = entry.content;
@@ -75,7 +74,6 @@ async function extractRecentMessages(transcriptPath) {
     }
   }
 
-  // Return last N messages
   return messages.slice(-MAX_MESSAGES);
 }
 
@@ -96,9 +94,7 @@ function applyToL1(l1Data, suggestions) {
     const contentLower = item.content.toLowerCase();
 
     if (item.target === 'active.blockers' || item.signal === 'blocker') {
-      // Check for "unblocked/resolved" - these remove blockers, don't add
       if (/unblocked|resolved/i.test(item.content)) {
-        // Try to find and remove matching blocker
         const beforeLen = l1Data.active.blockers.length;
         l1Data.active.blockers = l1Data.active.blockers.filter(b =>
           !item.content.toLowerCase().includes(b.toLowerCase().slice(0, 20))
@@ -121,7 +117,6 @@ function applyToL1(l1Data, suggestions) {
         persisted++;
       }
     }
-    // Other targets (prefs, identity.key_refs) are not auto-persisted from compaction
   }
 
   return persisted;
@@ -136,6 +131,7 @@ async function main() {
     process.exit(0); // Never block compaction
   }
 
+  let client;
   try {
     // Read transcript path from stdin
     const stdinData = await readStdin();
@@ -150,7 +146,6 @@ async function main() {
       const input = JSON.parse(stdinData);
       transcriptPath = input.transcript_path;
     } catch {
-      // Maybe it's just the path as plain text
       transcriptPath = stdinData;
     }
 
@@ -173,15 +168,23 @@ async function main() {
       process.exit(0);
     }
 
-    // Load L1
+    // Ensure server and connect MCP client
     const passphrase = await getEncryptionKey();
     if (!passphrase) {
       console.error('[Cordelia PreCompact] No encryption key, skipping');
       process.exit(0);
     }
 
-    const key = await initCrypto(passphrase);
-    const { l1Data } = await readL1(userId, key);
+    const memoryRoot = await getMemoryRoot();
+    const { baseUrl } = await ensureServer(passphrase, memoryRoot);
+    client = await createMcpClient(baseUrl);
+
+    // Read L1 via MCP
+    const l1Data = await readL1(client, userId);
+    if (!l1Data) {
+      console.error('[Cordelia PreCompact] No L1 context, skipping');
+      process.exit(0);
+    }
 
     // Apply suggestions to L1
     const persisted = applyToL1(l1Data, suggestions);
@@ -201,17 +204,23 @@ async function main() {
       );
     }
 
-    // Write back
-    await writeL1(userId, l1Data, key);
+    // Write back via MCP
+    const writeResult = await writeL1(client, userId, 'replace', l1Data, l1Data.updated_at);
+    if (writeResult?.error) {
+      console.error(`[Cordelia PreCompact] Write error: ${writeResult.error}`);
+    }
 
     console.error(`[Cordelia PreCompact] Persisted ${persisted} items (signals: ${signals.join(', ')})`);
-    // stdout message visible to Claude after compaction
     console.log(`[Cordelia] Pre-compaction flush: ${persisted} insights persisted to L1`);
 
   } catch (error) {
     // Never block compaction
     console.error(`[Cordelia PreCompact] Error (non-fatal): ${error.message}`);
     process.exit(0);
+  } finally {
+    if (client) {
+      try { await client.close(); } catch { /* ignore */ }
+    }
   }
 }
 

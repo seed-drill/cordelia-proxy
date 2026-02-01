@@ -3,30 +3,33 @@
  * Cordelia SessionStart Hook - Load L1 hot context with integrity verification
  *
  * Flow:
- * 1. Check remote for sync status
- * 2. Decrypt L1 context
- * 3. Verify integrity chain (recompute hash, compare to stored)
- * 4. Update current_session_start
- * 5. Output context + verification status to stdout
+ * 1. Ensure local HTTP server sidecar is running
+ * 2. Connect MCP client via SSE
+ * 3. Read L1 context via memory_read_hot
+ * 4. Verify integrity chain (recompute hash, compare to stored)
+ * 5. Update current_session_start
+ * 6. Write back via memory_write_hot
+ * 7. Output context + verification status to stdout
  *
  * Usage: CORDELIA_ENCRYPTION_KEY="..." node session-start.mjs [user_id]
  */
 import {
-  getEncryptionKey, initCrypto, readL1, writeL1,
-  computeContentHash, computeChainHash, CORDELIA_DIR, getUserId,
+  getEncryptionKey, getMemoryRoot,
+  computeContentHash, computeChainHash, getUserId,
 } from './lib.mjs';
-import { attemptRecovery, notify } from './recovery.mjs';
+import { ensureServer } from './server-manager.mjs';
+import { createMcpClient, readL1, writeL1 } from './mcp-client.mjs';
+import { notify } from './recovery.mjs';
 
 const REMOTE_URL = process.env.CORDELIA_REMOTE_URL || 'https://cordelia-seed-drill.fly.dev';
 
 /**
  * Check remote sync status
- * Returns { synced: boolean, direction?: 'pull'|'push', remoteTime?: Date, localTime?: Date }
  */
 async function checkSyncStatus(userId, localData) {
   try {
     const response = await fetch(`${REMOTE_URL}/api/hot/${userId}`, {
-      signal: AbortSignal.timeout(5000), // 5 second timeout
+      signal: AbortSignal.timeout(5000),
     });
 
     if (response.status === 404) {
@@ -71,7 +74,6 @@ async function checkSyncStatus(userId, localData) {
 
 /**
  * Verify integrity chain.
- * Returns { valid: boolean, reason?: string, sessionAge?: string }
  */
 function verifyIntegrity(l1Data) {
   if (!l1Data.ephemeral) {
@@ -122,29 +124,25 @@ async function main() {
     process.exit(0);
   }
 
+  let client;
   try {
-    const key = await initCrypto(passphrase);
+    // Ensure HTTP server sidecar is running
+    const memoryRoot = await getMemoryRoot();
+    const { baseUrl, cold } = await ensureServer(passphrase, memoryRoot);
+    if (cold) {
+      console.error('[Cordelia] Started HTTP server sidecar');
+    }
 
-    // Read L1 with recovery support
-    let l1Data, recoveredFrom;
-    try {
-      const result = await readL1(userId, key, async (l1Path, decryptError) => {
-        console.error(`[Cordelia] Decryption failed: ${decryptError.message}`);
-        console.error('[Cordelia] Attempting recovery...');
-        const recovery = await attemptRecovery(l1Path, CORDELIA_DIR);
-        if (recovery.recovered) {
-          console.error(`[Cordelia] Recovered from ${recovery.source}`);
-          notify('Cordelia: Recovered', `Memory restored from ${recovery.source}`);
-        }
-        return recovery;
-      });
-      l1Data = result.l1Data;
-      recoveredFrom = result.recoveredFrom;
-    } catch (error) {
-      notify('Cordelia: RECOVERY FAILED', error.message);
-      console.error(`[Cordelia] Recovery failed: ${error.message}`);
+    // Connect MCP client
+    client = await createMcpClient(baseUrl);
+
+    // Read L1 via MCP
+    const l1Data = await readL1(client, userId);
+
+    if (!l1Data) {
+      console.error(`[Cordelia] No L1 context found for user: ${userId}`);
       console.log('=== CORDELIA L1 HOT CONTEXT ===');
-      console.log(`{"error": "recovery failed: ${error.message}"}`);
+      console.log(`{"error": "no L1 context for ${userId}"}`);
       console.log('=== END CORDELIA CONTEXT ===');
       process.exit(0);
     }
@@ -165,7 +163,11 @@ async function main() {
         contentHash
       );
 
-      await writeL1(userId, l1Data, key);
+      // Write back via MCP
+      const writeResult = await writeL1(client, userId, 'replace', l1Data, l1Data.updated_at);
+      if (writeResult?.error) {
+        console.error(`[Cordelia] Write error: ${writeResult.error}`);
+      }
     }
 
     // Check sync status with remote
@@ -185,9 +187,7 @@ async function main() {
     const focus = l1Data.active?.focus || 'No active focus';
 
     // Brief status to stderr
-    if (recoveredFrom) {
-      console.error(`[Cordelia] Session ${sessionNum} | RECOVERED from ${recoveredFrom}`);
-    } else if (integrity.valid) {
+    if (integrity.valid) {
       const syncInfo = syncStatus.synced ? 'Synced' : `SYNC: ${syncStatus.direction}`;
       console.error(`[Cordelia] Session ${sessionNum} | Genesis +${daysSinceGenesis}d | Chain OK | ${syncInfo}`);
     } else {
@@ -196,10 +196,7 @@ async function main() {
 
     // macOS notification
     let notifTitle, notifMsg;
-    if (recoveredFrom) {
-      notifTitle = 'Cordelia: Recovered';
-      notifMsg = `Session ${sessionNum} | Restored from ${recoveredFrom}`;
-    } else if (integrity.valid) {
+    if (integrity.valid) {
       notifTitle = 'Cordelia Active';
       notifMsg = `Session ${sessionNum} | Chain verified`;
     } else {
@@ -211,10 +208,7 @@ async function main() {
     // Full banner to stdout
     console.log('');
     console.log('================================================');
-    if (recoveredFrom) {
-      console.log(`[CORDELIA] Session ${sessionNum} | Genesis +${daysSinceGenesis}d | RECOVERED`);
-      console.log(`[RECOVERY] Restored from ${recoveredFrom}`);
-    } else if (integrity.valid) {
+    if (integrity.valid) {
       console.log(`[CORDELIA] Session ${sessionNum} | Genesis +${daysSinceGenesis}d | Chain: VERIFIED`);
     } else {
       console.log(`[CORDELIA] Session ${sessionNum} | Genesis +${daysSinceGenesis}d | Chain: FAILED`);
@@ -258,6 +252,10 @@ async function main() {
     console.log(`{"error": "${error.message}"}`);
     console.log('=== END CORDELIA CONTEXT ===');
     process.exit(0);
+  } finally {
+    if (client) {
+      try { await client.close(); } catch { /* ignore */ }
+    }
   }
 }
 
