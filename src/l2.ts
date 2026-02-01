@@ -5,8 +5,12 @@
  * but can be retrieved on demand.
  *
  * Search paths:
- *   SQL path (SQLite + FTS5): FTS5 BM25 + optional sqlite-vec cosine, 70/30 hybrid
+ *   SQL path (SQLite + FTS5): FTS5 BM25 + optional sqlite-vec cosine, dominant-signal hybrid
  *   Legacy path (JSON provider): in-memory keyword + optional cosine similarity
+ *
+ *   Hybrid scoring: 0.7 * max(semantic, keyword) + 0.3 * min(semantic, keyword)
+ *   Dominant signal leads, weaker signal boosts. Prevents keyword-precise queries
+ *   (e.g. "386") being drowned by weak semantic scores.
  */
 
 import * as crypto from 'crypto';
@@ -455,9 +459,9 @@ async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
     const kw = ftsScores.get(id) || 0;
     const sem = vecScores.get(id) || 0;
 
-    // 70/30 semantic/keyword when semantic available, otherwise keyword only
+    // Dominant-signal hybrid: stronger signal leads, weaker boosts
     const score = hasSemanticScores
-      ? sem * 0.7 + kw * 0.3
+      ? 0.7 * Math.max(sem, kw) + 0.3 * Math.min(sem, kw)
       : kw;
 
     if (score === 0) continue;
@@ -534,7 +538,7 @@ async function searchLegacy(options: SearchOptions): Promise<SearchResult[]> {
 
       const normalizedKeyword = Math.min(keywordScore / 15, 1);
       const combinedScore = queryEmbedding
-        ? semanticScore * 0.7 + normalizedKeyword * 0.3
+        ? 0.7 * Math.max(semanticScore, normalizedKeyword) + 0.3 * Math.min(semanticScore, normalizedKeyword)
         : keywordScore;
 
       if (combinedScore === 0 && keywordScore === 0) continue;
