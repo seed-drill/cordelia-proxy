@@ -7,6 +7,7 @@ HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 MCP_JSON="$HOME/seed-drill/.mcp.json"
 if [ -f "$MCP_JSON" ]; then
   export CORDELIA_ENCRYPTION_KEY=$(jq -r '.mcpServers.cordelia.env.CORDELIA_ENCRYPTION_KEY // empty' "$MCP_JSON" 2>/dev/null)
+  export CORDELIA_STORAGE=$(jq -r '.mcpServers.cordelia.env.CORDELIA_STORAGE // "sqlite"' "$MCP_JSON" 2>/dev/null)
 fi
 
 if [ -z "$CORDELIA_ENCRYPTION_KEY" ]; then

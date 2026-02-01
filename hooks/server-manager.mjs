@@ -77,6 +77,7 @@ async function spawnServer(passphrase, memoryRoot) {
     ...process.env,
     CORDELIA_HTTP_PORT: String(DEFAULT_PORT),
     CORDELIA_MEMORY_ROOT: memoryRoot,
+    CORDELIA_STORAGE: process.env.CORDELIA_STORAGE || 'sqlite',
   };
   if (passphrase) {
     env.CORDELIA_ENCRYPTION_KEY = passphrase;
