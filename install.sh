@@ -210,61 +210,9 @@ console.log('Global MCP configured: ' + globalMcp);
 info "Cordelia MCP server configured globally"
 
 # ============================================
-# Step 5: Create L1 context for user
+# Step 5: Generate config.toml and seed L1 context
 # ============================================
-step "Creating memory for $USER_ID..."
-
-L1_DIR="$CORDELIA_DIR/memory/L1-hot"
-L1_FILE="$L1_DIR/$USER_ID.json"
-mkdir -p "$L1_DIR"
-
-if [ ! -f "$L1_FILE" ] || [ ! -s "$L1_FILE" ]; then
-    # Capitalize first letter of user_id for name (portable method)
-    USER_NAME="$(echo "${USER_ID:0:1}" | tr '[:lower:]' '[:upper:]')${USER_ID:1}"
-
-    cat > "$L1_FILE" << EOF
-{
-  "version": 1,
-  "updated_at": "$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")",
-  "identity": {
-    "id": "${USER_ID}",
-    "name": "${USER_NAME}",
-    "roles": [],
-    "orgs": [],
-    "key_refs": [],
-    "style": [],
-    "tz": "Europe/London"
-  },
-  "active": {
-    "project": null,
-    "sprint": null,
-    "focus": "Getting started with Cordelia",
-    "blockers": [],
-    "next": ["Explore Cordelia memory system", "Configure personal preferences"],
-    "context_refs": [],
-    "sprint_plan": {},
-    "notes": ["Welcome to Cordelia - your AI memory system"]
-  },
-  "prefs": {
-    "planning_mode": "important",
-    "feedback_style": "continuous",
-    "verbosity": "concise",
-    "emoji": false,
-    "proactive_suggestions": true,
-    "auto_commit": false
-  },
-  "delegation": {
-    "allowed": true,
-    "max_parallel": 3,
-    "require_approval": ["git_push", "destructive_operations", "external_api_calls", "file_delete"],
-    "autonomous": ["file_read", "file_write", "git_commit", "code_execution_sandbox"]
-  }
-}
-EOF
-    info "Created L1 context: $USER_ID.json"
-else
-    info "L1 context already exists for $USER_ID"
-fi
+step "Creating configuration for $USER_ID..."
 
 # Generate config.toml (identity, paths, and node config)
 CORDELIA_CONFIG_DIR="$HOME/.cordelia"
@@ -341,6 +289,23 @@ mkdir -p "$SALT_DIR"
 if [ ! -f "$SALT_FILE" ]; then
     openssl rand -out "$SALT_FILE" 32
     info "Generated encryption salt"
+fi
+
+# Seed L1 context via MCP (writes to SQLite through proper storage layer)
+step "Seeding L1 memory for $USER_ID..."
+export CORDELIA_ENCRYPTION_KEY="$ENCRYPTION_KEY"
+if [ "$NO_EMBEDDINGS" = true ]; then
+    export CORDELIA_EMBEDDING_PROVIDER=none
+fi
+node "$CORDELIA_DIR/scripts/seed-l1.mjs" "$USER_ID"
+info "L1 context seeded via MCP"
+
+# Stop the sidecar started by seed script (clean slate for first real session)
+SIDECAR_PID_FILE="$HOME/.cordelia/http-server.pid"
+if [ -f "$SIDECAR_PID_FILE" ]; then
+    SIDECAR_PID=$(cat "$SIDECAR_PID_FILE")
+    kill "$SIDECAR_PID" 2>/dev/null || true
+    rm -f "$SIDECAR_PID_FILE"
 fi
 
 # ============================================
@@ -496,7 +461,8 @@ ERRORS=0
 
 [ -f "$CORDELIA_DIR/dist/server.js" ] && info "MCP server built" || { warn "MCP server missing"; ERRORS=$((ERRORS+1)); }
 [ -f "$GLOBAL_MCP" ] && info "Global MCP config exists (~/.claude.json)" || { warn "Global MCP config missing"; ERRORS=$((ERRORS+1)); }
-[ -f "$L1_FILE" ] && [ -s "$L1_FILE" ] && info "L1 context exists and non-empty" || { warn "L1 context missing or empty"; ERRORS=$((ERRORS+1)); }
+CORDELIA_DB="$HOME/.cordelia/memory/cordelia.db"
+[ -f "$CORDELIA_DB" ] && [ -s "$CORDELIA_DB" ] && info "L1 context exists in SQLite" || { warn "SQLite database missing or empty"; ERRORS=$((ERRORS+1)); }
 [ -f "$SETTINGS_FILE" ] && info "Claude settings exist" || { warn "Claude settings missing"; ERRORS=$((ERRORS+1)); }
 [ -d "$SKILLS_DEST/persist" ] && info "Skills installed" || { warn "Skills missing"; ERRORS=$((ERRORS+1)); }
 
@@ -524,7 +490,7 @@ echo "Configuration:"
 echo "  MCP Server:  ~/.claude.json (global - works from any directory)"
 echo "  Hooks:       ~/.claude/settings.json"
 echo "  Skills:      ~/.claude/skills/ (persist, sprint, remember)"
-echo "  Memory:      $CORDELIA_DIR/memory/L1-hot/$USER_ID.json"
+echo "  Memory:      ~/.cordelia/memory/cordelia.db (encrypted SQLite)"
 echo ""
 echo "Next steps:"
 echo "  1. Open a NEW terminal window (to load the encryption key)"
