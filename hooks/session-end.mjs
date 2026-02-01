@@ -170,12 +170,6 @@ async function main() {
       // Auto-generate session summary (R2-015)
       l1Data.ephemeral.last_summary = generateSummary(l1Data);
 
-      // L1 size guard - warn if approaching bloat threshold
-      const l1Size = JSON.stringify(l1Data).length;
-      if (l1Size > 50 * 1024) {
-        console.error(`[Cordelia] WARNING: L1 size ${Math.round(l1Size / 1024)}KB exceeds 50KB target. Consider pruning active.notes (${l1Data.active?.notes?.length || 0} items).`);
-      }
-
       // Recompute chain hash after all updates
       const contentHash = computeContentHash(l1Data);
       l1Data.ephemeral.integrity.previous_hash = previousHash;

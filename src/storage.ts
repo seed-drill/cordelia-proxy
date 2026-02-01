@@ -139,10 +139,7 @@ export async function initStorageProvider(memoryRoot: string): Promise<StoragePr
 
   let provider: StorageProvider;
 
-  if (storageType === 'hybrid') {
-    const { HybridStorageProvider } = await import('./storage-hybrid.js');
-    provider = new HybridStorageProvider(memoryRoot);
-  } else if (storageType === 'node') {
+  if (storageType === 'node') {
     const { NodeStorageProvider } = await import('./storage-node.js');
     const nodeUrl = process.env.CORDELIA_NODE_URL || 'http://127.0.0.1:9473';
     const nodeToken = process.env.CORDELIA_NODE_TOKEN || '';
