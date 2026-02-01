@@ -120,6 +120,23 @@ async function main(): Promise<void> {
     ttlSweepInterval.unref();
   }
 
+  // Sync group items from P2P network (non-blocking on failure)
+  try {
+    const { getNodeBridge } = await import('./node-bridge.js');
+    const bridge = getNodeBridge();
+    if (await bridge.isAvailable()) {
+      await bridge.syncGroups(storageProvider);
+      const allGroups = await storageProvider.listGroups();
+      const groupIds = allGroups.map((g) => g.id);
+      const result = await bridge.syncGroupItems(groupIds, storageProvider);
+      if (result.synced > 0) {
+        console.error(`Cordelia: synced ${result.synced} group items from P2P network`);
+      }
+    }
+  } catch (e) {
+    console.error(`Cordelia: node bridge sync failed (non-fatal): ${(e as Error).message}`);
+  }
+
   // Initialize policy engine
   setPolicyEngine(new InlinePolicyEngine(storageProvider));
 

@@ -399,7 +399,7 @@ describe('SQLite v1 to v2 migration', () => {
 
     // Verify schema version is current (4, after v1->v2->v3->v4 migration)
     const versionRow = provider.getDatabase().prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number };
-    assert.strictEqual(versionRow.version, 4, 'schema version should be 4 after full migration chain');
+    assert.strictEqual(versionRow.version, 5, 'schema version should be 5 after full migration chain');
 
     // Verify FTS table exists and is populated from index
     assert.strictEqual(provider.hasFtsData(), true, 'FTS should be populated from index');
@@ -854,7 +854,7 @@ describe('SQLite v2 to v3 migration', () => {
 
     // Verify schema version is 4 after full chain
     const versionRow = provider.getDatabase().prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number };
-    assert.strictEqual(versionRow.version, 4, 'Schema should be v4 after full migration chain');
+    assert.strictEqual(versionRow.version, 5, 'Schema should be v5 after full migration chain');
 
     // Verify checksum column exists and is backfilled
     const items = provider.getDatabase().prepare('SELECT id, checksum FROM l2_items').all() as Array<{ id: string; checksum: string | null }>;
@@ -955,7 +955,7 @@ describe('SQLite v3 to v4 migration', () => {
 
     // Verify schema version is 4
     const versionRow = provider.getDatabase().prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number };
-    assert.strictEqual(versionRow.version, 4, 'Schema should be v4');
+    assert.strictEqual(versionRow.version, 5, 'Schema should be v5');
 
     // Verify groups table exists
     const groupsTable = provider.getDatabase().prepare(

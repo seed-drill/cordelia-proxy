@@ -623,12 +623,25 @@ export async function readItem(id: string): Promise<L2Item | null> {
 
     // Handle encrypted items
     if (isEncryptedPayload(parsed)) {
-      const cryptoProvider = getDefaultCryptoProvider();
-      if (!cryptoProvider.isUnlocked()) {
-        throw new Error('Cannot read encrypted item: encryption not configured');
+      // Check if this is a group PSK-encrypted item (key_version=2)
+      const itemMeta = await storage.readL2ItemMeta(id);
+      if (itemMeta && itemMeta.key_version === 2 && itemMeta.group_id) {
+        const { getGroupKey, groupDecrypt } = await import('./group-keys.js');
+        const groupKey = await getGroupKey(itemMeta.group_id);
+        if (groupKey) {
+          const decrypted = await groupDecrypt(parsed as EncryptedPayload, groupKey);
+          parsed = JSON.parse(decrypted.toString('utf-8'));
+        } else {
+          throw new Error(`Cannot read group item: no PSK for group ${itemMeta.group_id}`);
+        }
+      } else {
+        const cryptoProvider = getDefaultCryptoProvider();
+        if (!cryptoProvider.isUnlocked()) {
+          throw new Error('Cannot read encrypted item: encryption not configured');
+        }
+        const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
+        parsed = JSON.parse(decrypted.toString('utf-8'));
       }
-      const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
-      parsed = JSON.parse(decrypted.toString('utf-8'));
     }
 
     // Record access (no-op for JSON provider, increments for SQLite)
@@ -744,11 +757,24 @@ export async function writeItem(
   const subdir = type === 'entity' ? 'entities' : type === 'session' ? 'sessions' : 'learnings';
   const relativePath = `${subdir}/${id}.json`;
 
-  // Encrypt if crypto provider is unlocked
+  // Encrypt: group items use group PSK, private items use proxy personal key
   const cryptoProvider = getDefaultCryptoProvider();
   let fileContent: string;
 
-  if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
+  if (options.group_id) {
+    // Group items encrypted with group PSK for cross-user sharing
+    const { getGroupKey, groupEncrypt } = await import('./group-keys.js');
+    const groupKey = await getGroupKey(options.group_id);
+    if (groupKey) {
+      const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
+      const encrypted = await groupEncrypt(plaintext, groupKey);
+      fileContent = JSON.stringify(encrypted, null, 2);
+    } else {
+      // No group key available -- store plaintext (local-only, won't be shareable)
+      console.error(`Cordelia: no PSK for group ${options.group_id}, storing unencrypted`);
+      fileContent = JSON.stringify(validated, null, 2);
+    }
+  } else if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
     const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
     const encrypted = await cryptoProvider.encrypt(plaintext);
     fileContent = JSON.stringify(encrypted, null, 2);
@@ -764,6 +790,7 @@ export async function writeItem(
     visibility: options.group_id ? 'group' : 'private',
     group_id: options.group_id,
     author_id: options.entity_id,
+    key_version: options.group_id ? 2 : 1,
   };
   await storage.writeL2Item(id, type, Buffer.from(fileContent, 'utf-8'), meta);
 
@@ -819,6 +846,16 @@ export async function writeItem(
 
   if (embedding && storage.vecAvailable()) {
     await storage.vecUpsert(id, toFloat32Array(embedding));
+  }
+
+  // Push group items to Rust node for P2P replication
+  if (options.group_id) {
+    const { getNodeBridge } = await import('./node-bridge.js');
+    const bridge = getNodeBridge();
+    const encryptedData = JSON.parse(fileContent);
+    bridge.pushGroupItem(id, type, encryptedData, meta).catch((e) => {
+      console.error(`Cordelia: node push failed: ${(e as Error).message}`);
+    });
   }
 
   const result: { success: true; id: string; ttl_expires?: string } = { success: true, id };
@@ -894,22 +931,49 @@ export async function shareItem(
     return { error: 'not_found' };
   }
 
+  // Decrypt original data (may be encrypted with proxy personal key)
+  let plainData: Buffer;
+  const parsed = JSON.parse(original.data.toString('utf-8'));
+  if (isEncryptedPayload(parsed)) {
+    const cryptoProvider = getDefaultCryptoProvider();
+    if (!cryptoProvider.isUnlocked()) {
+      return { error: 'encryption_locked' };
+    }
+    plainData = await cryptoProvider.decrypt(parsed as EncryptedPayload);
+  } else {
+    plainData = original.data;
+  }
+
+  // Re-encrypt with group PSK for cross-user sharing
+  const { getGroupKey, groupEncrypt } = await import('./group-keys.js');
+  const groupKey = await getGroupKey(targetGroup);
+  let cowFileContent: Buffer;
+  let cowKeyVersion = 1;
+  if (groupKey) {
+    const encrypted = await groupEncrypt(plainData, groupKey);
+    cowFileContent = Buffer.from(JSON.stringify(encrypted, null, 2), 'utf-8');
+    cowKeyVersion = 2;
+  } else {
+    cowFileContent = plainData; // No PSK, store as-is
+  }
+
   // Generate new ID for COW copy
   const copyId = generateId();
   const subdir = original.type === 'entity' ? 'entities' : original.type === 'session' ? 'sessions' : 'learnings';
   const relativePath = `${subdir}/${copyId}.json`;
 
   // Write COW copy
-  await storage.writeL2Item(copyId, original.type, original.data, {
+  const cowMeta = {
     type: original.type as 'entity' | 'session' | 'learning',
     owner_id: meta.owner_id,
     author_id: entityId,
-    visibility: 'group',
+    visibility: 'group' as const,
     group_id: targetGroup,
     parent_id: itemId,
     is_copy: true,
-    key_version: 1,
-  });
+    key_version: cowKeyVersion,
+  };
+  await storage.writeL2Item(copyId, original.type, cowFileContent, cowMeta);
 
   // Update L2 index with copy entry
   const index = await loadIndex();
@@ -930,6 +994,16 @@ export async function shareItem(
     const tags = originalEntry.tags.join(' ');
     const keywords = originalEntry.keywords.join(' ');
     await storage.ftsUpsert(copyId, name, keywords, tags);
+  }
+
+  // Push COW copy to Rust node for P2P replication
+  if (cowKeyVersion === 2) {
+    const { getNodeBridge } = await import('./node-bridge.js');
+    const bridge = getNodeBridge();
+    const encryptedData = JSON.parse(cowFileContent.toString('utf-8'));
+    bridge.pushGroupItem(copyId, original.type, encryptedData, cowMeta).catch((e) => {
+      console.error(`Cordelia: node push (share) failed: ${(e as Error).message}`);
+    });
   }
 
   // Log to access_log

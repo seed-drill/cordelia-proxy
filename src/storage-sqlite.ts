@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import { createRequire } from 'module';
 import type { StorageProvider, L2ItemMeta, GroupRow, GroupMemberRow, AccessLogEntry } from './storage.js';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const SCHEMA_V1_SQL = `
 CREATE TABLE IF NOT EXISTS l1_hot (
@@ -128,6 +128,10 @@ export class SqliteStorageProvider implements StorageProvider {
 
     if (currentVersion < 4) {
       this.migrateToV4();
+    }
+
+    if (currentVersion < 5) {
+      this.migrateToV5();
     }
 
     // Try to load sqlite-vec
@@ -328,6 +332,17 @@ export class SqliteStorageProvider implements StorageProvider {
       this.db.prepare('UPDATE schema_version SET version = ?, migrated_at = datetime(\'now\')').run(SCHEMA_VERSION);
     });
     tx();
+  }
+
+  private migrateToV5(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS sync_state (
+        group_id TEXT PRIMARY KEY,
+        last_sync_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.prepare('UPDATE schema_version SET version = ?, migrated_at = datetime(\'now\')').run(SCHEMA_VERSION);
   }
 
   private loadSqliteVec(): void {
@@ -688,6 +703,9 @@ export class SqliteStorageProvider implements StorageProvider {
     if (currentVersion < 4) {
       this.migrateToV4();
     }
+    if (currentVersion < 5) {
+      this.migrateToV5();
+    }
 
     // Rebuild FTS from l2_items
     try {
@@ -884,5 +902,26 @@ export class SqliteStorageProvider implements StorageProvider {
     } catch {
       return 0;
     }
+  }
+
+  // -- Sync State (node bridge) --
+
+  getSyncTimestamp(groupId: string): string | null {
+    try {
+      const row = this.db.prepare('SELECT last_sync_at FROM sync_state WHERE group_id = ?').get(groupId) as { last_sync_at: string } | undefined;
+      return row?.last_sync_at ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  setSyncTimestamp(groupId: string, timestamp: string): void {
+    this.db.prepare(`
+      INSERT INTO sync_state (group_id, last_sync_at, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(group_id) DO UPDATE SET
+        last_sync_at = excluded.last_sync_at,
+        updated_at = datetime('now')
+    `).run(groupId, timestamp);
   }
 }
