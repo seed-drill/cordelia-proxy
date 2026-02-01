@@ -1,27 +1,19 @@
 #!/bin/bash
-# Cordelia SessionEnd Hook - Update timestamp and auto-commit memory
+# Cordelia SessionEnd Hook - Update ephemeral memory via MCP
 
-USER_ID="russell"
-MEMORY_FILE="$HOME/cordelia/memory/L1-hot/${USER_ID}.json"
-CORDELIA_DIR="$HOME/cordelia"
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [ -f "$MEMORY_FILE" ]; then
-  # Update the updated_at timestamp using jq
-  TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  jq --arg ts "$TIMESTAMP" '.updated_at = $ts' "$MEMORY_FILE" > "${MEMORY_FILE}.tmp"
-  mv "${MEMORY_FILE}.tmp" "$MEMORY_FILE"
+# Source encryption key from seed-drill .mcp.json
+MCP_JSON="$HOME/seed-drill/.mcp.json"
+if [ -f "$MCP_JSON" ]; then
+  export CORDELIA_ENCRYPTION_KEY=$(jq -r '.mcpServers.cordelia.env.CORDELIA_ENCRYPTION_KEY // empty' "$MCP_JSON" 2>/dev/null)
 fi
 
-# Auto-commit memory changes (sleep/wake model - memory persists automatically)
-cd "$CORDELIA_DIR"
-if git diff --quiet memory/ && git diff --cached --quiet memory/; then
-  # No memory changes to commit
+if [ -z "$CORDELIA_ENCRYPTION_KEY" ]; then
   exit 0
 fi
 
-git add memory/
-git commit -m "chore: Auto-commit memory state
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>" --no-verify 2>/dev/null || true
+# session-end.mjs reads user_id and memory_root from ~/.cordelia/config.toml
+node "$HOOK_DIR/session-end.mjs"
 
 exit 0

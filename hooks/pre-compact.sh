@@ -2,8 +2,7 @@
 # Cordelia PreCompact Hook - Flush insights before context compaction (R2-011)
 # Reads transcript_path from stdin, passes to pre-compact.mjs
 
-USER_ID="russell"
-CORDELIA_DIR="$HOME/cordelia"
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source encryption key
 MCP_JSON="$HOME/seed-drill/.mcp.json"
@@ -16,6 +15,7 @@ if [ -z "$CORDELIA_ENCRYPTION_KEY" ]; then
 fi
 
 # Pass stdin through to node script
-node "$CORDELIA_DIR/hooks/pre-compact.mjs" "$USER_ID"
+# pre-compact.mjs reads user_id and memory_root from ~/.cordelia/config.toml
+node "$HOOK_DIR/pre-compact.mjs"
 
 exit 0
