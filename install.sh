@@ -171,9 +171,9 @@ GLOBAL_MCP="$HOME/.claude.json"
 
 # Build the env object based on embeddings setting
 if [ "$NO_EMBEDDINGS" = true ]; then
-    ENV_JSON="{\"CORDELIA_ENCRYPTION_KEY\": \"$ENCRYPTION_KEY\", \"CORDELIA_EMBEDDING_PROVIDER\": \"none\"}"
+    ENV_JSON="{\"CORDELIA_ENCRYPTION_KEY\": \"$ENCRYPTION_KEY\", \"CORDELIA_EMBEDDING_PROVIDER\": \"none\", \"CORDELIA_STORAGE\": \"sqlite\"}"
 else
-    ENV_JSON="{\"CORDELIA_ENCRYPTION_KEY\": \"$ENCRYPTION_KEY\"}"
+    ENV_JSON="{\"CORDELIA_ENCRYPTION_KEY\": \"$ENCRYPTION_KEY\", \"CORDELIA_STORAGE\": \"sqlite\"}"
 fi
 
 # Use node to safely merge with existing config
