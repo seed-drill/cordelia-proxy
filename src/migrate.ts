@@ -143,7 +143,7 @@ async function migrate(): Promise<void> {
   console.log(`  Audit entries: ${auditCount}`);
   console.log(`  Database:      ${DB_PATH}`);
   console.log('\nJSON files have NOT been deleted (backup).');
-  console.log('Set CORDELIA_STORAGE=sqlite to use the new database.');
+  console.log('SQLite is now the default storage backend.');
 }
 
 migrate().catch((error) => {

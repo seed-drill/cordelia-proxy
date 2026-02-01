@@ -90,7 +90,7 @@ The installer automatically configures `~/.claude.json` (global MCP config):
 | `CORDELIA_EMBEDDING_PROVIDER` | Embedding provider: `ollama`, `openai`, `none` | `ollama` |
 | `CORDELIA_EMBEDDING_URL` | Embedding API URL | `http://localhost:11434` |
 | `CORDELIA_EMBEDDING_MODEL` | Embedding model name | `nomic-embed-text` |
-| `CORDELIA_STORAGE` | Storage backend: `json`, `sqlite` | `json` |
+| `CORDELIA_STORAGE` | Storage backend: `sqlite`, `json` (legacy) | `sqlite` |
 | `CORDELIA_TTL_SWEEP_INTERVAL_MS` | Interval for TTL expiry sweep (ms) | `3600000` |
 
 ## Available MCP Tools

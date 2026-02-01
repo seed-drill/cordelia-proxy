@@ -319,33 +319,71 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
   const storage = getStorageProvider();
   const index = await loadIndex();
 
-  // Build lookup map from blob index for metadata
+  // Build lookup map from blob index for metadata.
+  // Enrich with domain from DB since domain is edge-only metadata (not in encrypted blob).
   const entryMap = new Map<string, L2IndexEntry>();
   for (const entry of index.entries) {
+    if (!entry.domain && storage.name === 'sqlite') {
+      const meta = await storage.readL2ItemMeta(entry.id);
+      if (meta?.domain) {
+        entry.domain = meta.domain as MemoryDomain;
+      }
+    }
     entryMap.set(entry.id, entry);
   }
 
-  // No query: return all matching type/tags from blob index
+  // No query: return all matching type/tags/domain.
+  // When domain filter is set on SQLite, query DB directly since blob index
+  // may not contain all items (e.g. sessions written before domain migration).
   if (!query) {
     let results: SearchResult[] = [];
-    for (const entry of index.entries) {
-      if (type && entry.type !== type) continue;
-      if (domainFilter && entry.domain !== domainFilter) continue;
-      if (tags && tags.length > 0) {
-        const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
-        if (!hasMatchingTag) continue;
+
+    if (domainFilter && storage.name === 'sqlite') {
+      // DB-backed domain query -- authoritative source for domain classification.
+      // Use getDomainItems (no visibility filter) since search doesn't scope by owner.
+      const sqliteStorage = storage as SqliteStorageProvider;
+      const dbItems = await sqliteStorage.getDomainItems(domainFilter, limit);
+      for (const item of dbItems) {
+        if (type && item.type !== type) continue;
+        const entry = entryMap.get(item.id);
+        const name = entry?.name || item.id;
+        const itemTags = entry?.tags || [];
+        if (tags && tags.length > 0) {
+          const hasMatchingTag = tags.some((t) => itemTags.includes(t.toLowerCase()));
+          if (!hasMatchingTag) continue;
+        }
+        results.push({
+          id: item.id,
+          type: item.type as 'entity' | 'session' | 'learning',
+          subtype: entry?.subtype,
+          name,
+          tags: itemTags,
+          path: entry?.path || `${item.type}s/${item.id}.json`,
+          score: 1,
+          domain: item.domain as MemoryDomain | undefined,
+        });
       }
-      results.push({
-        id: entry.id,
-        type: entry.type,
-        subtype: entry.subtype,
-        name: entry.name,
-        tags: entry.tags,
-        path: entry.path,
-        score: 1,
-        domain: entry.domain,
-      });
+    } else {
+      for (const entry of index.entries) {
+        if (type && entry.type !== type) continue;
+        if (domainFilter && entry.domain !== domainFilter) continue;
+        if (tags && tags.length > 0) {
+          const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
+          if (!hasMatchingTag) continue;
+        }
+        results.push({
+          id: entry.id,
+          type: entry.type,
+          subtype: entry.subtype,
+          name: entry.name,
+          tags: entry.tags,
+          path: entry.path,
+          score: 1,
+          domain: entry.domain,
+        });
+      }
     }
+
     results = results.slice(0, limit);
     for (const r of results) await storage.recordAccess(r.id);
 
@@ -578,11 +616,20 @@ export async function readItem(id: string): Promise<L2Item | null> {
     // Record access (no-op for JSON provider, increments for SQLite)
     await storage.recordAccess(id);
 
-    // Refresh TTL for interrupt-domain items on access
+    // Refresh TTL on access: domain policy for private items, culture policy for group items
     if (storage.name === 'sqlite') {
       const accessMeta = await storage.readL2ItemMeta(id);
-      if (accessMeta?.domain === 'interrupt') {
-        await storage.updateTtl(id, computeInterruptTtl());
+      if (accessMeta?.ttl_expires_at) {
+        if (accessMeta.visibility === 'group' && accessMeta.group_id) {
+          // Group item: refresh from culture policy
+          const culture = await getGroupCulture(accessMeta.group_id);
+          if (culture?.ttl_default && culture.ttl_default > 0) {
+            await storage.updateTtl(id, new Date(Date.now() + culture.ttl_default * 1000).toISOString());
+          }
+        } else if (accessMeta.domain === 'interrupt') {
+          // Private interrupt item: refresh from domain policy
+          await storage.updateTtl(id, computeInterruptTtl());
+        }
       }
     }
 
@@ -722,23 +769,22 @@ export async function writeItem(
     fileContent = JSON.stringify(validated, null, 2);
   }
 
-  // Determine domain
+  // Determine domain (metadata -- always set regardless of visibility)
   const domain: MemoryDomain = options.domain || inferDomainFromType(type, subtype);
 
-  // Compute TTL for interrupt-domain items
+  // Lifecycle policy: group culture governs group items, domain governs private items.
+  // Groups are sovereign over their own information handling policies.
   let ttlExpires: string | undefined;
-  if (domain === 'interrupt') {
-    ttlExpires = computeInterruptTtl();
-  }
-
-  // Group culture TTL override: use shorter of domain TTL and culture TTL
   if (options.group_id) {
+    // Group item: culture policy is the sole TTL source
     const culture = await getGroupCulture(options.group_id);
     if (culture?.ttl_default && culture.ttl_default > 0) {
-      const cultureTtl = new Date(Date.now() + culture.ttl_default * 1000).toISOString();
-      if (!ttlExpires || cultureTtl < ttlExpires) {
-        ttlExpires = cultureTtl;
-      }
+      ttlExpires = new Date(Date.now() + culture.ttl_default * 1000).toISOString();
+    }
+  } else {
+    // Private item: domain governs lifecycle
+    if (domain === 'interrupt') {
+      ttlExpires = computeInterruptTtl();
     }
   }
 
@@ -1091,6 +1137,89 @@ export async function sweepExpiredItems(): Promise<{ swept: number }> {
   }
 
   return { swept };
+}
+
+/**
+ * Backfill domain classification by reading items through the decryption layer.
+ * The V6 migration conservatively assigns all learnings to procedural, but
+ * learnings with subtype "principle" should be value. This function reads each
+ * item, checks the actual subtype, and reclassifies where needed.
+ */
+export async function backfillDomains(): Promise<{
+  total: number;
+  reclassified: number;
+  skipped: number;
+  errors: number;
+  changes: Array<{ id: string; from: string; to: string; reason: string }>;
+}> {
+  const storage = getStorageProvider();
+  if (storage.name !== 'sqlite') {
+    return { total: 0, reclassified: 0, skipped: 0, errors: 0, changes: [] };
+  }
+
+  const sqliteStorage = storage as SqliteStorageProvider;
+  const allItems = sqliteStorage.listL2ItemIds();
+  let reclassified = 0;
+  let skipped = 0;
+  let errors = 0;
+  const changes: Array<{ id: string; from: string; to: string; reason: string }> = [];
+
+  for (const entry of allItems) {
+    try {
+      const meta = await storage.readL2ItemMeta(entry.id);
+      if (!meta) {
+        skipped++;
+        continue;
+      }
+
+      const currentDomain = meta.domain || 'unclassified';
+
+      // Read through decryption layer to get actual content
+      const item = await readItem(entry.id);
+      if (!item) {
+        skipped++;
+        continue;
+      }
+
+      // Determine correct domain from actual item data
+      let subtype: string | undefined;
+      if (entry.type === 'learning') {
+        subtype = (item as L2Learning).type;
+      } else if (entry.type === 'entity') {
+        subtype = (item as L2Entity).type;
+      }
+
+      const correctDomain = inferDomainFromType(
+        entry.type as 'entity' | 'session' | 'learning',
+        subtype,
+      );
+
+      if (correctDomain !== currentDomain) {
+        // Compute TTL for interrupt items that don't have one yet
+        const ttl = correctDomain === 'interrupt' && !meta.ttl_expires_at
+          ? computeInterruptTtl()
+          : meta.ttl_expires_at;
+
+        // Update via raw SQL since we only need to change metadata columns
+        const db = sqliteStorage.getDatabase();
+        db.prepare('UPDATE l2_items SET domain = ?, ttl_expires_at = ? WHERE id = ?')
+          .run(correctDomain, ttl || null, entry.id);
+
+        changes.push({
+          id: entry.id,
+          from: currentDomain,
+          to: correctDomain,
+          reason: `${entry.type}/${subtype || 'none'}`,
+        });
+        reclassified++;
+      }
+    } catch (e) {
+      console.error(`Cordelia: domain backfill error for ${entry.id}: ${(e as Error).message}`);
+      errors++;
+    }
+  }
+
+  return { total: allItems.length, reclassified, skipped, errors, changes };
 }
 
 /**

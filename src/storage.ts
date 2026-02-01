@@ -144,7 +144,7 @@ export function setStorageProvider(provider: StorageProvider): void {
  * Returns the initialized provider.
  */
 export async function initStorageProvider(memoryRoot: string): Promise<StorageProvider> {
-  const storageType = process.env.CORDELIA_STORAGE || 'json';
+  const storageType = process.env.CORDELIA_STORAGE || 'sqlite';
 
   let provider: StorageProvider;
 

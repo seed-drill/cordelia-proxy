@@ -6,7 +6,7 @@
  * Validates FTS, vec, diagnostics, and degradation behavior.
  *
  * Run: npx tsx src/search-integration.test.ts
- *   Requires: CORDELIA_STORAGE=sqlite (or defaults to JSON where search degrades gracefully)
+ *   Requires: CORDELIA_STORAGE=sqlite (default)
  */
 
 import * as path from 'path';

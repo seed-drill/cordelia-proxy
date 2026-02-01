@@ -14,7 +14,7 @@ import assert from 'node:assert';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { JsonStorageProvider } from './storage-json.js';
+import { SqliteStorageProvider } from './storage-sqlite.js';
 import type { StorageProvider } from './storage.js';
 
 describe('Identity Contract', () => {
@@ -29,7 +29,8 @@ describe('Identity Contract', () => {
     await fs.mkdir(path.join(memoryRoot, 'L2-warm', '.salt'), { recursive: true });
     await fs.mkdir(path.join(memoryRoot, 'L2-warm', 'items'), { recursive: true });
 
-    provider = new JsonStorageProvider(memoryRoot);
+    provider = new SqliteStorageProvider(memoryRoot);
+    await provider.initialize();
   });
 
   after(async () => {

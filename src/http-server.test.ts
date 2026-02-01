@@ -77,9 +77,8 @@ before(async () => {
   await fs.mkdir(path.join(tmpDir, 'L1-hot'), { recursive: true });
   await fs.mkdir(path.join(tmpDir, 'L2-warm', 'items'), { recursive: true });
 
-  // Use JSON storage for tests (no encryption complexity)
-  process.env.CORDELIA_STORAGE = 'json';
-  // Disable encryption for test simplicity
+  // Use SQLite storage, disable encryption for test simplicity
+  process.env.CORDELIA_STORAGE = 'sqlite';
   delete process.env.CORDELIA_ENCRYPTION_KEY;
 
   const { startServer } = await import('./http-server.js');

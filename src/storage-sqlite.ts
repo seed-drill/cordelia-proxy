@@ -914,6 +914,12 @@ export class SqliteStorageProvider implements StorageProvider {
     return this.db.prepare(sql).all(...params) as Array<{ id: string; type: string; domain: string | null; group_id: string | null; last_accessed_at: string | null }>;
   }
 
+  async getDomainItems(domain: string, limit: number): Promise<Array<{ id: string; type: string; domain: string | null }>> {
+    return this.db.prepare(
+      `SELECT id, type, domain FROM l2_items WHERE domain = ? ORDER BY last_accessed_at DESC NULLS LAST LIMIT ?`
+    ).all(domain, limit) as Array<{ id: string; type: string; domain: string | null }>;
+  }
+
   async getExpiredItems(now: string): Promise<Array<{ id: string; domain: string | null }>> {
     return this.db.prepare(
       `SELECT id, domain FROM l2_items WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < ? AND (domain IS NULL OR domain != 'value')`
@@ -921,11 +927,12 @@ export class SqliteStorageProvider implements StorageProvider {
   }
 
   async getEvictableProceduralItems(cap: number): Promise<string[]> {
+    // Only evict private procedural items -- group items are governed by group culture policy
     const rows = this.db.prepare(`
       SELECT id FROM l2_items
-      WHERE domain = 'procedural'
+      WHERE domain = 'procedural' AND visibility = 'private'
       ORDER BY access_count ASC, last_accessed_at ASC NULLS FIRST
-      LIMIT max(0, (SELECT COUNT(*) FROM l2_items WHERE domain = 'procedural') - ?)
+      LIMIT max(0, (SELECT COUNT(*) FROM l2_items WHERE domain = 'procedural' AND visibility = 'private') - ?)
     `).all(cap) as Array<{ id: string }>;
     return rows.map((r) => r.id);
   }
