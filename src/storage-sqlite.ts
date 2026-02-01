@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import { createRequire } from 'module';
 import type { StorageProvider, L2ItemMeta, GroupRow, GroupMemberRow, AccessLogEntry } from './storage.js';
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 const SCHEMA_V1_SQL = `
 CREATE TABLE IF NOT EXISTS l1_hot (
@@ -132,6 +132,10 @@ export class SqliteStorageProvider implements StorageProvider {
 
     if (currentVersion < 5) {
       this.migrateToV5();
+    }
+
+    if (currentVersion < 6) {
+      this.migrateToV6();
     }
 
     // Try to load sqlite-vec
@@ -345,6 +349,31 @@ export class SqliteStorageProvider implements StorageProvider {
     this.db.prepare('UPDATE schema_version SET version = ?, migrated_at = datetime(\'now\')').run(SCHEMA_VERSION);
   }
 
+  private migrateToV6(): void {
+    // Add domain and ttl_expires_at columns (O(1) in SQLite, no table rebuild)
+    try {
+      this.db.exec(`ALTER TABLE l2_items ADD COLUMN domain TEXT CHECK(domain IS NULL OR domain IN ('value', 'procedural', 'interrupt'))`);
+    } catch {
+      // Column may already exist from partial migration
+    }
+    try {
+      this.db.exec('ALTER TABLE l2_items ADD COLUMN ttl_expires_at TEXT');
+    } catch {
+      // Column may already exist
+    }
+
+    // Partial indexes for domain queries
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_l2_items_domain ON l2_items(domain) WHERE domain IS NOT NULL');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_l2_items_ttl ON l2_items(ttl_expires_at) WHERE ttl_expires_at IS NOT NULL');
+
+    // Conservative backfill: sessions -> interrupt, learnings/entities -> procedural
+    this.db.exec("UPDATE l2_items SET domain = 'interrupt' WHERE type = 'session' AND domain IS NULL");
+    this.db.exec("UPDATE l2_items SET domain = 'procedural' WHERE type = 'learning' AND domain IS NULL");
+    this.db.exec("UPDATE l2_items SET domain = 'procedural' WHERE type = 'entity' AND domain IS NULL");
+
+    this.db.prepare('UPDATE schema_version SET version = ?, migrated_at = datetime(\'now\')').run(SCHEMA_VERSION);
+  }
+
   private loadSqliteVec(): void {
     try {
       const require = createRequire(import.meta.url);
@@ -447,8 +476,8 @@ export class SqliteStorageProvider implements StorageProvider {
   async writeL2Item(id: string, type: string, data: Buffer, meta: L2ItemMeta): Promise<void> {
     const checksum = crypto.createHash('sha256').update(data).digest('hex');
     this.db.prepare(`
-      INSERT INTO l2_items (id, type, owner_id, visibility, data, checksum, group_id, author_id, key_version, parent_id, is_copy, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      INSERT INTO l2_items (id, type, owner_id, visibility, data, checksum, group_id, author_id, key_version, parent_id, is_copy, domain, ttl_expires_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(id) DO UPDATE SET
         type = excluded.type,
         owner_id = excluded.owner_id,
@@ -460,6 +489,8 @@ export class SqliteStorageProvider implements StorageProvider {
         key_version = excluded.key_version,
         parent_id = excluded.parent_id,
         is_copy = excluded.is_copy,
+        domain = excluded.domain,
+        ttl_expires_at = excluded.ttl_expires_at,
         updated_at = datetime('now')
     `).run(
       id, type,
@@ -471,6 +502,8 @@ export class SqliteStorageProvider implements StorageProvider {
       meta.key_version ?? 1,
       meta.parent_id || null,
       meta.is_copy ? 1 : 0,
+      meta.domain || null,
+      meta.ttl_expires_at || null,
     );
   }
 
@@ -614,13 +647,13 @@ export class SqliteStorageProvider implements StorageProvider {
 
   // -- Prefetch (R3-012) --
 
-  async getRecentItems(entityId: string, groupIds: string[], limit: number): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null }>> {
+  async getRecentItems(entityId: string, groupIds: string[], limit: number): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null; domain: string | null }>> {
     // Build query: private items owned by entity + items in specified groups
     // Ordered by last_accessed_at DESC (most recently accessed first)
     const placeholders = groupIds.map(() => '?').join(',');
     const params: (string | number)[] = [];
 
-    let sql = `SELECT id, type, group_id, last_accessed_at FROM l2_items WHERE (`;
+    let sql = `SELECT id, type, group_id, last_accessed_at, domain FROM l2_items WHERE (`;
 
     // Private items owned by this entity
     sql += `(visibility = 'private' AND owner_id = ?)`;
@@ -635,7 +668,7 @@ export class SqliteStorageProvider implements StorageProvider {
     sql += `) ORDER BY last_accessed_at DESC NULLS LAST LIMIT ?`;
     params.push(limit);
 
-    return this.db.prepare(sql).all(...params) as Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null }>;
+    return this.db.prepare(sql).all(...params) as Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null; domain: string | null }>;
   }
 
   // -- Audit --
@@ -712,6 +745,9 @@ export class SqliteStorageProvider implements StorageProvider {
     }
     if (currentVersion < 5) {
       this.migrateToV5();
+    }
+    if (currentVersion < 6) {
+      this.migrateToV6();
     }
 
     // Rebuild FTS from l2_items
@@ -843,11 +879,74 @@ export class SqliteStorageProvider implements StorageProvider {
     ).all(groupId, limit) as Array<{ id: string; type: string; data: Buffer }>;
   }
 
-  async readL2ItemMeta(id: string): Promise<{ owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number } | null> {
+  async readL2ItemMeta(id: string): Promise<{ owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number; domain: string | null; ttl_expires_at: string | null } | null> {
     const row = this.db.prepare(
-      'SELECT owner_id, visibility, group_id, author_id, key_version, parent_id, is_copy FROM l2_items WHERE id = ?'
-    ).get(id) as { owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number } | undefined;
+      'SELECT owner_id, visibility, group_id, author_id, key_version, parent_id, is_copy, domain, ttl_expires_at FROM l2_items WHERE id = ?'
+    ).get(id) as { owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number; domain: string | null; ttl_expires_at: string | null } | undefined;
     return row || null;
+  }
+
+  // -- Domain-aware queries (R3-domain) --
+
+  async getItemsByDomain(entityId: string, groupIds: string[], domain: string, limit: number): Promise<Array<{ id: string; type: string; domain: string | null; group_id: string | null; last_accessed_at: string | null }>> {
+    const placeholders = groupIds.map(() => '?').join(',');
+    const params: (string | number)[] = [];
+
+    let sql = `SELECT id, type, domain, group_id, last_accessed_at FROM l2_items WHERE domain = ? AND (`;
+    params.push(domain);
+
+    sql += `(visibility = 'private' AND owner_id = ?)`;
+    params.push(entityId);
+
+    if (groupIds.length > 0) {
+      sql += ` OR (visibility = 'group' AND group_id IN (${placeholders}))`;
+      params.push(...groupIds);
+    }
+
+    // Order: value by last_accessed_at, procedural by access_count DESC, interrupt by last_accessed_at DESC
+    if (domain === 'procedural') {
+      sql += `) ORDER BY access_count DESC, last_accessed_at DESC NULLS LAST LIMIT ?`;
+    } else {
+      sql += `) ORDER BY last_accessed_at DESC NULLS LAST LIMIT ?`;
+    }
+    params.push(limit);
+
+    return this.db.prepare(sql).all(...params) as Array<{ id: string; type: string; domain: string | null; group_id: string | null; last_accessed_at: string | null }>;
+  }
+
+  async getExpiredItems(now: string): Promise<Array<{ id: string; domain: string | null }>> {
+    return this.db.prepare(
+      `SELECT id, domain FROM l2_items WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < ? AND (domain IS NULL OR domain != 'value')`
+    ).all(now) as Array<{ id: string; domain: string | null }>;
+  }
+
+  async getEvictableProceduralItems(cap: number): Promise<string[]> {
+    const rows = this.db.prepare(`
+      SELECT id FROM l2_items
+      WHERE domain = 'procedural'
+      ORDER BY access_count ASC, last_accessed_at ASC NULLS FIRST
+      LIMIT max(0, (SELECT COUNT(*) FROM l2_items WHERE domain = 'procedural') - ?)
+    `).all(cap) as Array<{ id: string }>;
+    return rows.map((r) => r.id);
+  }
+
+  async updateTtl(id: string, ttlExpiresAt: string): Promise<void> {
+    this.db.prepare('UPDATE l2_items SET ttl_expires_at = ? WHERE id = ?').run(ttlExpiresAt, id);
+  }
+
+  async getDomainCounts(): Promise<{ value: number; procedural: number; interrupt: number; unclassified: number }> {
+    const rows = this.db.prepare(
+      'SELECT domain, COUNT(*) as cnt FROM l2_items GROUP BY domain'
+    ).all() as Array<{ domain: string | null; cnt: number }>;
+
+    const counts = { value: 0, procedural: 0, interrupt: 0, unclassified: 0 };
+    for (const row of rows) {
+      if (row.domain === 'value') counts.value = row.cnt;
+      else if (row.domain === 'procedural') counts.procedural = row.cnt;
+      else if (row.domain === 'interrupt') counts.interrupt = row.cnt;
+      else counts.unclassified = row.cnt;
+    }
+    return counts;
   }
 
   // -- Canary --

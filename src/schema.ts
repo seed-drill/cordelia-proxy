@@ -203,6 +203,11 @@ export const L2LearningSchema = z.object({
 });
 
 /**
+ * Memory domain - lifecycle classification for L2 items
+ */
+export const MemoryDomainSchema = z.enum(['value', 'procedural', 'interrupt']);
+
+/**
  * Index Entry - lightweight metadata for search
  */
 export const L2IndexEntrySchema = z.object({
@@ -215,6 +220,7 @@ export const L2IndexEntrySchema = z.object({
   path: z.string().describe('Relative file path from L2-warm/'),
   embedding: z.array(z.number()).optional().describe('Semantic embedding vector'),
   visibility: z.enum(['private', 'group', 'public', 'shared']).default('private').describe('Access visibility for multi-user support'),
+  domain: MemoryDomainSchema.optional().describe('Memory domain: value (permanent), procedural (usage-based), interrupt (TTL)'),
 });
 
 /**

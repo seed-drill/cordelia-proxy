@@ -15,6 +15,7 @@ import {
 import * as path from 'path';
 import { L1HotContextSchema, GroupCultureSchema, type L1HotContext } from './schema.js';
 import { analyzeNovelty, analyzeSession, filterForPersistence, type NoveltyResult } from './novelty.js';
+import { checkL1Budget, getL1Budgets } from './domain.js';
 import * as l2 from './l2.js';
 import {
   getDefaultCryptoProvider,
@@ -211,6 +212,20 @@ async function writeHotContext(
     }
   }
 
+  // L1 budget enforcement: reject writes that exceed size limits
+  const budgetCheck = checkL1Budget(newContext as unknown as Record<string, unknown>);
+  if (!budgetCheck.ok) {
+    const budgets = getL1Budgets();
+    const detail = budgetCheck.violations
+      .map((v) => `Section "${v.section}" is ${(v.actual / 1024).toFixed(1)}KB, budget is ${(v.budget / 1024).toFixed(1)}KB`)
+      .join('. ');
+    return {
+      error: 'l1_budget_exceeded',
+      detail,
+      current_updated_at: current.updated_at,
+    };
+  }
+
   // Recompute chain hash after any content change (patch or replace).
   // Patch callers (e.g. /persist, memory_write_hot from Claude) don't include
   // the integrity block, so the chain_hash becomes stale when content changes.
@@ -388,6 +403,11 @@ export function registerCordeliaTools(server: Server): void {
               type: 'string',
               description: 'Filter results to a specific group',
             },
+            domain: {
+              type: 'string',
+              enum: ['value', 'procedural', 'interrupt'],
+              description: 'Filter by memory domain',
+            },
             debug: {
               type: 'boolean',
               description: 'Return diagnostic metadata (search path, scores, vec availability)',
@@ -438,6 +458,11 @@ export function registerCordeliaTools(server: Server): void {
             group_id: {
               type: 'string',
               description: 'Optional: target group for group-scoped writes',
+            },
+            domain: {
+              type: 'string',
+              enum: ['value', 'procedural', 'interrupt'],
+              description: 'Memory domain. Inferred from item type if not provided.',
             },
           },
           required: ['type', 'data'],
@@ -756,6 +781,7 @@ export function registerCordeliaTools(server: Server): void {
           l2Stats.embedding_cache_size_db = sqliteProvider.embeddingCacheCount();
           l2Stats.vec_available = sqliteProvider.vecAvailable();
           l2Stats.vec_count = sqliteProvider.vecCount();
+          l2Stats.domain_counts = await sqliteProvider.getDomainCounts();
         }
 
         // Embedding provider info
@@ -832,16 +858,17 @@ export function registerCordeliaTools(server: Server): void {
       }
 
       case 'memory_search': {
-        const { query, type, tags, limit, debug } = args as {
+        const { query, type, tags, limit, domain: searchDomain, debug } = args as {
           query?: string;
           type?: 'entity' | 'session' | 'learning';
           tags?: string[];
           limit?: number;
+          domain?: 'value' | 'procedural' | 'interrupt';
           debug?: boolean;
         };
 
         if (debug) {
-          const { results: debugResults, diagnostics } = await l2.search({ query, type, tags, limit, debug: true as const });
+          const { results: debugResults, diagnostics } = await l2.search({ query, type, tags, limit, domain: searchDomain, debug: true as const });
           return {
             content: [
               {
@@ -852,7 +879,7 @@ export function registerCordeliaTools(server: Server): void {
           };
         }
 
-        const results = await l2.search({ query, type, tags, limit });
+        const results = await l2.search({ query, type, tags, limit, domain: searchDomain });
 
         return {
           content: [
@@ -904,11 +931,12 @@ export function registerCordeliaTools(server: Server): void {
       }
 
       case 'memory_write_warm': {
-        const { type, data, entity_id, group_id: writeGroupId } = args as {
+        const { type, data, entity_id, group_id: writeGroupId, domain: writeDomain } = args as {
           type: 'entity' | 'session' | 'learning';
           data: Record<string, unknown>;
           entity_id?: string;
           group_id?: string;
+          domain?: 'value' | 'procedural' | 'interrupt';
         };
 
         if (entity_id && writeGroupId) {
@@ -925,7 +953,7 @@ export function registerCordeliaTools(server: Server): void {
           }
         }
 
-        const result = await l2.writeItem(type, data, { group_id: writeGroupId, entity_id });
+        const result = await l2.writeItem(type, data, { group_id: writeGroupId, entity_id, domain: writeDomain });
 
         return {
           content: [

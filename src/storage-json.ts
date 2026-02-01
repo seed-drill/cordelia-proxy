@@ -193,7 +193,7 @@ export class JsonStorageProvider implements StorageProvider {
   async updateMemberPosture(_groupId: string, _entityId: string, _posture: string): Promise<boolean> { this.groupStubError(); }
   async logAccess(_entry: AccessLogEntry): Promise<void> { this.groupStubError(); }
   async listGroupItems(_groupId: string, _limit?: number): Promise<Array<{ id: string; type: string; data: Buffer }>> { this.groupStubError(); }
-  async readL2ItemMeta(_id: string): Promise<{ owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number } | null> { this.groupStubError(); }
+  async readL2ItemMeta(_id: string): Promise<{ owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number; domain: string | null; ttl_expires_at: string | null } | null> { this.groupStubError(); }
 
   // -- Backup & Restore (not supported for JSON provider) --
 
@@ -211,9 +211,21 @@ export class JsonStorageProvider implements StorageProvider {
 
   // -- Prefetch (R3-012) --
 
-  async getRecentItems(_entityId: string, _groupIds: string[], _limit: number): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null }>> {
+  async getRecentItems(_entityId: string, _groupIds: string[], _limit: number): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null; domain: string | null }>> {
     // JSON provider does not support access tracking; return empty
     return [];
+  }
+
+  // -- Domain-aware queries (stubs for JSON provider) --
+
+  async getItemsByDomain(_entityId: string, _groupIds: string[], _domain: string, _limit: number): Promise<Array<{ id: string; type: string; domain: string | null; group_id: string | null; last_accessed_at: string | null }>> {
+    return [];
+  }
+  async getExpiredItems(_now: string): Promise<Array<{ id: string; domain: string | null }>> { return []; }
+  async getEvictableProceduralItems(_cap: number): Promise<string[]> { return []; }
+  async updateTtl(_id: string, _ttlExpiresAt: string): Promise<void> { /* no-op */ }
+  async getDomainCounts(): Promise<{ value: number; procedural: number; interrupt: number; unclassified: number }> {
+    return { value: 0, procedural: 0, interrupt: 0, unclassified: 0 };
   }
 
   // -- Audit --

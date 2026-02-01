@@ -28,6 +28,12 @@ import {
   type L2Learning,
 } from './schema.js';
 import {
+  inferDomainFromType,
+  computeInterruptTtl,
+  PROCEDURAL_CAP,
+  type MemoryDomain,
+} from './domain.js';
+import {
   getDefaultProvider,
   getEmbeddableText,
   extractStringValues,
@@ -96,6 +102,7 @@ export interface SearchResult {
   tags: string[];
   path: string;
   score: number;
+  domain?: MemoryDomain;
 }
 
 export interface SearchDiagnostics {
@@ -121,6 +128,7 @@ export interface SearchOptions {
   limit?: number;
   semantic?: boolean; // Enable semantic search (default: true if embeddings available)
   debug?: boolean;    // Return diagnostic metadata alongside results
+  domain?: MemoryDomain; // Filter by memory domain
 }
 
 /**
@@ -307,7 +315,7 @@ function extractKeywords(text: string): string[] {
  * For JSON/non-SQLite providers, FTS/vec return empty — degrades to blob index listing.
  */
 async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { results: SearchResult[]; diagnostics: SearchDiagnostics }> {
-  const { query, type, tags, limit = 20, semantic = true, debug = false } = options;
+  const { query, type, tags, limit = 20, semantic = true, debug = false, domain: domainFilter } = options;
   const storage = getStorageProvider();
   const index = await loadIndex();
 
@@ -322,6 +330,7 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
     let results: SearchResult[] = [];
     for (const entry of index.entries) {
       if (type && entry.type !== type) continue;
+      if (domainFilter && entry.domain !== domainFilter) continue;
       if (tags && tags.length > 0) {
         const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
         if (!hasMatchingTag) continue;
@@ -334,6 +343,7 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
         tags: entry.tags,
         path: entry.path,
         score: 1,
+        domain: entry.domain,
       });
     }
     results = results.slice(0, limit);
@@ -423,6 +433,9 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
     // Type filter
     if (type && entry.type !== type) continue;
 
+    // Domain filter
+    if (domainFilter && entry.domain !== domainFilter) continue;
+
     // Tag filter
     if (tags && tags.length > 0) {
       const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
@@ -433,9 +446,13 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
     const sem = vecScores.get(id) || 0;
 
     // Dominant-signal hybrid: stronger signal leads, weaker boosts
-    const score = hasSemanticScores
+    let score = hasSemanticScores
       ? 0.7 * Math.max(sem, kw) + 0.3 * Math.min(sem, kw)
       : kw;
+
+    // Subtle domain boost: value items surface slightly higher
+    if (entry.domain === 'value') score += 0.05;
+    else if (entry.domain === 'procedural') score += 0.02;
 
     if (score === 0) continue;
 
@@ -447,6 +464,7 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
       tags: entry.tags,
       path: entry.path,
       score,
+      domain: entry.domain,
     });
 
     if (debug) {
@@ -560,6 +578,14 @@ export async function readItem(id: string): Promise<L2Item | null> {
     // Record access (no-op for JSON provider, increments for SQLite)
     await storage.recordAccess(id);
 
+    // Refresh TTL for interrupt-domain items on access
+    if (storage.name === 'sqlite') {
+      const accessMeta = await storage.readL2ItemMeta(id);
+      if (accessMeta?.domain === 'interrupt') {
+        await storage.updateTtl(id, computeInterruptTtl());
+      }
+    }
+
     // Validate based on type
     switch (itemType) {
       case 'entity':
@@ -618,6 +644,7 @@ function buildKeywordSources(validated: L2Item, name: string): string {
 export interface WriteItemOptions {
   group_id?: string;
   entity_id?: string;
+  domain?: MemoryDomain;
 }
 
 export async function writeItem(
@@ -695,6 +722,26 @@ export async function writeItem(
     fileContent = JSON.stringify(validated, null, 2);
   }
 
+  // Determine domain
+  const domain: MemoryDomain = options.domain || inferDomainFromType(type, subtype);
+
+  // Compute TTL for interrupt-domain items
+  let ttlExpires: string | undefined;
+  if (domain === 'interrupt') {
+    ttlExpires = computeInterruptTtl();
+  }
+
+  // Group culture TTL override: use shorter of domain TTL and culture TTL
+  if (options.group_id) {
+    const culture = await getGroupCulture(options.group_id);
+    if (culture?.ttl_default && culture.ttl_default > 0) {
+      const cultureTtl = new Date(Date.now() + culture.ttl_default * 1000).toISOString();
+      if (!ttlExpires || cultureTtl < ttlExpires) {
+        ttlExpires = cultureTtl;
+      }
+    }
+  }
+
   // Write via storage provider
   const storage = getStorageProvider();
   const meta: import('./storage.js').L2ItemMeta = {
@@ -704,17 +751,10 @@ export async function writeItem(
     group_id: options.group_id,
     author_id: options.entity_id,
     key_version: options.group_id ? 2 : 1,
+    domain,
+    ttl_expires_at: ttlExpires,
   };
   await storage.writeL2Item(id, type, Buffer.from(fileContent, 'utf-8'), meta);
-
-  // Apply group culture TTL if writing to a group (R3-011)
-  let ttlExpires: string | undefined;
-  if (options.group_id) {
-    const culture = await getGroupCulture(options.group_id);
-    if (culture?.ttl_default && culture.ttl_default > 0) {
-      ttlExpires = new Date(Date.now() + culture.ttl_default * 1000).toISOString();
-    }
-  }
 
   // Update blob index
   const index = await loadIndex();
@@ -744,6 +784,7 @@ export async function writeItem(
     path: relativePath,
     embedding,
     visibility: options.group_id ? 'group' : 'private',
+    domain,
   };
 
   if (existingIdx >= 0) {
@@ -934,7 +975,7 @@ export async function shareItem(
 
 /**
  * Prefetch top L2 items for faster session start (R3-012).
- * Returns most recently accessed items from user's groups + private memory.
+ * Domain-aware ordering: values first, procedural next, interrupt last.
  * Context-aware: if a binding exists for cwd, prioritize bound group's items.
  */
 export async function prefetchItems(
@@ -944,7 +985,7 @@ export async function prefetchItems(
     bindings?: Record<string, string>;
     limit?: number;
   } = {},
-): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null }>> {
+): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null; domain: string | null }>> {
   const storage = getStorageProvider();
   if (storage.name !== 'sqlite') return [];
 
@@ -961,37 +1002,61 @@ export async function prefetchItems(
   // If context binding exists, prioritize bound group
   let boundGroupId: string | undefined;
   if (options.cwd && options.bindings) {
-    // Import dynamically to avoid circular deps at module level
     const { resolveContextBinding } = await import('./policy.js');
     boundGroupId = resolveContextBinding(options.cwd, options.bindings);
   }
 
-  if (boundGroupId) {
-    // Fetch bound group items first, then fill remaining from other groups
-    const boundItems = await storage.getRecentItems(entityId, [boundGroupId], limit);
-    if (boundItems.length >= limit) return boundItems;
+  const groupIds = boundGroupId
+    ? [boundGroupId, ...memberGroups.filter(g => g !== boundGroupId)]
+    : memberGroups;
 
-    const remaining = limit - boundItems.length;
-    const otherGroups = memberGroups.filter(g => g !== boundGroupId);
-    const otherItems = await storage.getRecentItems(entityId, otherGroups, remaining);
-    return [...boundItems, ...otherItems];
+  // Domain-aware prefetch: values first, procedural next, interrupt last
+  const valueItems = await storage.getItemsByDomain(entityId, groupIds, 'value', 50);
+  let remaining = limit - valueItems.length;
+
+  let proceduralItems: Array<{ id: string; type: string; domain: string | null; group_id: string | null; last_accessed_at: string | null }> = [];
+  if (remaining > 0) {
+    proceduralItems = await storage.getItemsByDomain(entityId, groupIds, 'procedural', remaining);
+    remaining -= proceduralItems.length;
   }
 
-  return storage.getRecentItems(entityId, memberGroups, limit);
+  let interruptItems: Array<{ id: string; type: string; domain: string | null; group_id: string | null; last_accessed_at: string | null }> = [];
+  if (remaining > 0) {
+    interruptItems = await storage.getItemsByDomain(entityId, groupIds, 'interrupt', remaining);
+  }
+
+  return [...valueItems, ...proceduralItems, ...interruptItems];
 }
 
 /**
- * Sweep expired items from groups with TTL.
- * Items where last_accessed_at is older than group TTL are deleted.
- * Items that have never been accessed use created_at as the reference.
+ * Sweep expired items using three eviction strategies:
+ * 1. Interrupt TTL sweep: delete items with expired ttl_expires_at
+ * 2. Procedural cap-based eviction: evict least-used items exceeding PROCEDURAL_CAP
+ * 3. Legacy group culture TTL: preserved for backwards compatibility
  */
 export async function sweepExpiredItems(): Promise<{ swept: number }> {
   const storage = getStorageProvider();
   if (storage.name !== 'sqlite') return { swept: 0 };
 
-  const groups = await storage.listGroups();
   let swept = 0;
+  const now = new Date().toISOString();
 
+  // 1. Interrupt TTL sweep
+  const expired = await storage.getExpiredItems(now);
+  for (const item of expired) {
+    await deleteItem(item.id);
+    swept++;
+  }
+
+  // 2. Procedural cap-based eviction
+  const evictable = await storage.getEvictableProceduralItems(PROCEDURAL_CAP);
+  for (const id of evictable) {
+    await deleteItem(id);
+    swept++;
+  }
+
+  // 3. Legacy group culture TTL (for items without domain-based TTL)
+  const groups = await storage.listGroups();
   for (const group of groups) {
     let culture: { ttl_default?: number | null } = {};
     try {
@@ -1009,21 +1074,14 @@ export async function sweepExpiredItems(): Promise<{ swept: number }> {
       const stats = await storage.getAccessStats(item.id);
       if (!stats) continue;
 
-      // Use last_accessed_at if available, otherwise fall back to checking if item is old enough
       const refTime = stats.last_accessed_at;
       if (!refTime) {
-        // Never accessed -- check created_at via meta
-        const itemMeta = await storage.readL2ItemMeta(item.id);
-        if (!itemMeta) continue;
-        // For never-accessed items, they'll have access_count=0. Skip them on first sweep.
-        // They get a grace period -- only swept if they exist in the group but are never accessed.
         if (stats.access_count === 0) continue;
       }
 
       if (refTime) {
         const lastAccess = new Date(refTime + 'Z').getTime();
-        const now = Date.now();
-        const ageSec = (now - lastAccess) / 1000;
+        const ageSec = (Date.now() - lastAccess) / 1000;
         if (ageSec > ttlSeconds) {
           await deleteItem(item.id);
           swept++;

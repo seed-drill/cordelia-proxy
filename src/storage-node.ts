@@ -393,6 +393,8 @@ export class NodeStorageProvider implements StorageProvider {
     key_version: number;
     parent_id: string | null;
     is_copy: number;
+    domain: string | null;
+    ttl_expires_at: string | null;
   } | null> {
     if (await this.useNode()) {
       try {
@@ -406,6 +408,8 @@ export class NodeStorageProvider implements StorageProvider {
           key_version: res.meta.key_version,
           parent_id: null, // Not in current API response
           is_copy: 0,
+          domain: null,
+          ttl_expires_at: null,
         };
       } catch (e) {
         if (e instanceof NodeClientError && e.status === 404) return null;
@@ -419,8 +423,32 @@ export class NodeStorageProvider implements StorageProvider {
   // Prefetch (R3-012)
   // ====================================================================
 
-  async getRecentItems(entityId: string, groupIds: string[], limit: number): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null }>> {
+  async getRecentItems(entityId: string, groupIds: string[], limit: number): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null; domain: string | null }>> {
     return this.local.getRecentItems(entityId, groupIds, limit);
+  }
+
+  // ====================================================================
+  // Domain-aware queries -> always local
+  // ====================================================================
+
+  async getItemsByDomain(entityId: string, groupIds: string[], domain: string, limit: number): Promise<Array<{ id: string; type: string; domain: string | null; group_id: string | null; last_accessed_at: string | null }>> {
+    return this.local.getItemsByDomain(entityId, groupIds, domain, limit);
+  }
+
+  async getExpiredItems(now: string): Promise<Array<{ id: string; domain: string | null }>> {
+    return this.local.getExpiredItems(now);
+  }
+
+  async getEvictableProceduralItems(cap: number): Promise<string[]> {
+    return this.local.getEvictableProceduralItems(cap);
+  }
+
+  async updateTtl(id: string, ttlExpiresAt: string): Promise<void> {
+    return this.local.updateTtl(id, ttlExpiresAt);
+  }
+
+  async getDomainCounts(): Promise<{ value: number; procedural: number; interrupt: number; unclassified: number }> {
+    return this.local.getDomainCounts();
   }
 
   // ====================================================================

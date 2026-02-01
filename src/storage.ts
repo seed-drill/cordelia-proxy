@@ -15,6 +15,8 @@ export interface L2ItemMeta {
   key_version?: number;
   parent_id?: string;
   is_copy?: boolean;
+  domain?: 'value' | 'procedural' | 'interrupt';
+  ttl_expires_at?: string;
 }
 
 export interface GroupRow {
@@ -92,10 +94,17 @@ export interface StorageProvider {
   updateMemberPosture(groupId: string, entityId: string, posture: string): Promise<boolean>;
   logAccess(entry: AccessLogEntry): Promise<void>;
   listGroupItems(groupId: string, limit?: number): Promise<Array<{ id: string; type: string; data: Buffer }>>;
-  readL2ItemMeta(id: string): Promise<{ owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number } | null>;
 
   // Prefetch (R3-012)
-  getRecentItems(entityId: string, groupIds: string[], limit: number): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null }>>;
+  getRecentItems(entityId: string, groupIds: string[], limit: number): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null; domain: string | null }>>;
+
+  // Domain-aware queries (R3-domain)
+  getItemsByDomain(entityId: string, groupIds: string[], domain: string, limit: number): Promise<Array<{ id: string; type: string; domain: string | null; group_id: string | null; last_accessed_at: string | null }>>;
+  getExpiredItems(now: string): Promise<Array<{ id: string; domain: string | null }>>;
+  getEvictableProceduralItems(cap: number): Promise<string[]>;
+  updateTtl(id: string, ttlExpiresAt: string): Promise<void>;
+  getDomainCounts(): Promise<{ value: number; procedural: number; interrupt: number; unclassified: number }>;
+  readL2ItemMeta(id: string): Promise<{ owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number; domain: string | null; ttl_expires_at: string | null } | null>;
 
   // Audit
   appendAudit(line: string): Promise<void>;

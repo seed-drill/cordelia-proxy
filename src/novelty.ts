@@ -6,6 +6,8 @@
  * meaning is rare, ruthlessly curate.
  */
 
+import { classifyDomain } from './domain.js';
+
 /**
  * Novelty signal types - what kind of novel information was detected
  */
@@ -38,6 +40,7 @@ export interface NoveltyExtract {
   content: string;
   confidence: number;      // 0-1
   target?: string;         // Where in L1 this might go (e.g., "identity.key_refs", "active.notes")
+  domain?: 'value' | 'procedural' | 'interrupt';  // Suggested memory domain
 }
 
 /**
@@ -140,6 +143,7 @@ export function analyzeNovelty(text: string): NoveltyResult {
         content: sentenceMatch,
         confidence,
         target,
+        domain: classifyDomain(signal, confidence),
       });
 
       totalScore += confidence;
