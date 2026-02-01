@@ -388,6 +388,10 @@ export function registerCordeliaTools(server: Server): void {
               type: 'string',
               description: 'Filter results to a specific group',
             },
+            debug: {
+              type: 'boolean',
+              description: 'Return diagnostic metadata (search path, scores, vec availability)',
+            },
           },
         },
       },
@@ -828,12 +832,25 @@ export function registerCordeliaTools(server: Server): void {
       }
 
       case 'memory_search': {
-        const { query, type, tags, limit } = args as {
+        const { query, type, tags, limit, debug } = args as {
           query?: string;
           type?: 'entity' | 'session' | 'learning';
           tags?: string[];
           limit?: number;
+          debug?: boolean;
         };
+
+        if (debug) {
+          const { results: debugResults, diagnostics } = await l2.search({ query, type, tags, limit, debug: true as const });
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({ results: debugResults, count: debugResults.length, diagnostics }),
+              },
+            ],
+          };
+        }
 
         const results = await l2.search({ query, type, tags, limit });
 

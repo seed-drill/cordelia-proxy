@@ -875,7 +875,7 @@ export class SqliteStorageProvider implements StorageProvider {
   }
 
   /**
-   * Check if FTS5 tables are populated (for search path selection).
+   * Check if FTS5 tables are populated.
    */
   hasFtsData(): boolean {
     try {
@@ -883,6 +883,30 @@ export class SqliteStorageProvider implements StorageProvider {
       return row.cnt > 0;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Count rows in l2_items table.
+   */
+  itemCount(): number {
+    try {
+      const row = this.db.prepare('SELECT COUNT(*) as cnt FROM l2_items').get() as { cnt: number };
+      return row.cnt;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Count rows in l2_fts table.
+   */
+  ftsCount(): number {
+    try {
+      const row = this.db.prepare('SELECT COUNT(*) as cnt FROM l2_fts').get() as { cnt: number };
+      return row.cnt;
+    } catch {
+      return 0;
     }
   }
 

@@ -6,7 +6,9 @@
  */
 
 import * as path from 'path';
-import { initStorageProvider } from './storage.js';
+import * as os from 'os';
+import * as fs from 'fs';
+import { initStorageProvider, getStorageProvider } from './storage.js';
 import * as l2 from './l2.js';
 
 async function test(name: string, fn: () => Promise<void>): Promise<boolean> {
@@ -28,9 +30,11 @@ function assert(condition: boolean, message: string): void {
 }
 
 async function runTests(): Promise<void> {
-  // Initialize storage provider before tests
-  const memoryRoot = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory');
-  await initStorageProvider(memoryRoot);
+  // Use temp SQLite database for isolation — keyword search requires FTS5
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cordelia-l2-test-'));
+  process.env.CORDELIA_STORAGE = 'sqlite';
+  process.env.CORDELIA_EMBEDDING_PROVIDER = 'none';
+  await initStorageProvider(tmpDir);
 
   console.log('\nL2 Warm Index Tests\n' + '='.repeat(40));
 
@@ -150,6 +154,10 @@ async function runTests(): Promise<void> {
     assert('success' in result && result.success === true, 'should succeed');
     assert('count' in result && result.count >= 0, 'should return count');
   })) passed++; else failed++;
+
+  // Cleanup
+  await getStorageProvider().close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 
   console.log('\n' + '='.repeat(40));
   console.log(`Results: ${passed} passed, ${failed} failed\n`);

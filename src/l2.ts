@@ -4,13 +4,13 @@
  * Searchable memory layer for content that isn't always loaded
  * but can be retrieved on demand.
  *
- * Search paths:
- *   SQL path (SQLite + FTS5): FTS5 BM25 + optional sqlite-vec cosine, dominant-signal hybrid
- *   Legacy path (JSON provider): in-memory keyword + optional cosine similarity
- *
+ * Search: FTS5 BM25 + optional sqlite-vec cosine, dominant-signal hybrid.
  *   Hybrid scoring: 0.7 * max(semantic, keyword) + 0.3 * min(semantic, keyword)
  *   Dominant signal leads, weaker signal boosts. Prevents keyword-precise queries
  *   (e.g. "386") being drowned by weak semantic scores.
+ *
+ * JSON provider returns empty FTS/vec results — search degrades to blob index
+ * listing (no-query path). This is acceptable for non-search test stubs.
  */
 
 import * as crypto from 'crypto';
@@ -29,7 +29,6 @@ import {
 } from './schema.js';
 import {
   getDefaultProvider,
-  cosineSimilarity,
   getEmbeddableText,
   extractStringValues,
   type EmbeddingProvider,
@@ -99,12 +98,29 @@ export interface SearchResult {
   score: number;
 }
 
+export interface SearchDiagnostics {
+  search_path: 'sql';
+  vec_available: boolean;
+  vec_used: boolean;
+  query_embedding_generated: boolean;
+  fts_candidates: number;
+  vec_candidates: number;
+  blob_index_entries: number;
+  results: Array<{
+    id: string;
+    fts_score: number;
+    vec_score: number;
+    combined_score: number;
+  }>;
+}
+
 export interface SearchOptions {
   query?: string;
   type?: L2ItemType;
   tags?: string[];
   limit?: number;
   semantic?: boolean; // Enable semantic search (default: true if embeddings available)
+  debug?: boolean;    // Return diagnostic metadata alongside results
 }
 
 /**
@@ -135,15 +151,6 @@ function bufferToEmbedding(buf: Buffer): number[] {
 function embeddingToBuffer(embedding: number[]): Buffer {
   const f32 = new Float32Array(embedding);
   return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
-}
-
-/**
- * Check if current storage is SQLite with FTS data.
- */
-function isSqlSearchPath(): boolean {
-  const storage = getStorageProvider();
-  if (storage.name !== 'sqlite') return false;
-  return (storage as SqliteStorageProvider).hasFtsData();
 }
 
 /**
@@ -186,7 +193,7 @@ async function getCachedEmbedding(
 
     return embedding;
   } catch (e) {
-    console.error(`Cordelia: embedding generation failed: ${(e as Error).message}`);
+    console.error(`Cordelia: embedding generation failed — falling back to FTS-only: ${(e as Error).message}`);
     return null;
   }
 }
@@ -295,54 +302,13 @@ function extractKeywords(text: string): string[] {
 }
 
 /**
- * Get embedding for an entry, from cache or by regenerating (legacy path).
+ * Search implementation: FTS5 BM25 + optional sqlite-vec cosine similarity.
+ * 70/30 dominant-signal hybrid weighting when both are available.
+ * For JSON/non-SQLite providers, FTS/vec return empty — degrades to blob index listing.
  */
-async function getEmbedding(entry: L2IndexEntry, embeddingProvider: EmbeddingProvider): Promise<number[] | null> {
-  // Check in-memory cache first
-  if (embeddingCache.has(entry.id)) {
-    return embeddingCache.get(entry.id)!;
-  }
-
-  // Check if persisted in entry (legacy, before stripping)
-  if (entry.embedding?.length) {
-    embeddingCache.set(entry.id, entry.embedding);
-    return entry.embedding;
-  }
-
-  // Lazy regenerate if provider available
-  if (embeddingProvider.dimensions() > 0) {
-    try {
-      const item = await readItem(entry.id);
-      if (item) {
-        const embeddableText = getEmbeddableText({
-          name: (item as { name?: string }).name,
-          summary: (item as { summary?: string }).summary,
-          content: (item as { content?: string }).content,
-          context: (item as { context?: string }).context,
-          focus: (item as { focus?: string }).focus,
-          highlights: (item as { highlights?: string[] }).highlights,
-          aliases: (item as { aliases?: string[] }).aliases,
-          tags: (item as { tags?: string[] }).tags,
-        });
-        const embedding = await embeddingProvider.embed(embeddableText);
-        embeddingCache.set(entry.id, embedding);
-        return embedding;
-      }
-    } catch {
-      // Continue without embedding
-    }
-  }
-
-  return null;
-}
-
-/**
- * SQL search path: FTS5 BM25 + optional sqlite-vec cosine similarity.
- * 70/30 semantic/keyword weighting when both are available.
- */
-async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
-  const { query, type, tags, limit = 20, semantic = true } = options;
-  const storage = getStorageProvider() as SqliteStorageProvider;
+async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { results: SearchResult[]; diagnostics: SearchDiagnostics }> {
+  const { query, type, tags, limit = 20, semantic = true, debug = false } = options;
+  const storage = getStorageProvider();
   const index = await loadIndex();
 
   // Build lookup map from blob index for metadata
@@ -351,7 +317,7 @@ async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
     entryMap.set(entry.id, entry);
   }
 
-  // No query: return all matching type/tags from blob index (same as legacy)
+  // No query: return all matching type/tags from blob index
   if (!query) {
     let results: SearchResult[] = [];
     for (const entry of index.entries) {
@@ -372,6 +338,22 @@ async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
     }
     results = results.slice(0, limit);
     for (const r of results) await storage.recordAccess(r.id);
+
+    if (debug) {
+      return {
+        results,
+        diagnostics: {
+          search_path: 'sql',
+          vec_available: storage.vecAvailable(),
+          vec_used: false,
+          query_embedding_generated: false,
+          fts_candidates: 0,
+          vec_candidates: 0,
+          blob_index_entries: index.entries.length,
+          results: results.map((r) => ({ id: r.id, fts_score: 0, vec_score: 0, combined_score: 1 })),
+        },
+      };
+    }
     return results;
   }
 
@@ -386,34 +368,23 @@ async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
     ftsScores.set(r.item_id, Math.abs(r.rank) / maxAbsRank);
   }
 
-  // Semantic search
+  // Semantic search via sqlite-vec
   const provider = getDefaultProvider();
-  const useVec = semantic && storage.vecAvailable() && provider.dimensions() > 0;
-  const useInMemoryCosine = semantic && !storage.vecAvailable() && provider.dimensions() > 0;
+  const vecAvailable = storage.vecAvailable();
+  const useVec = semantic && vecAvailable && provider.dimensions() > 0;
 
   const vecScores = new Map<string, number>();
   let queryEmbedding: number[] | null = null;
+  let queryEmbeddingGenerated = false;
 
-  if (useVec || useInMemoryCosine) {
+  if (useVec) {
     queryEmbedding = await getCachedEmbedding(query, provider);
-  }
-
-  if (useVec && queryEmbedding) {
-    // sqlite-vec cosine distance search
-    const vecResults = await storage.vecSearch(toFloat32Array(queryEmbedding), limit * 3);
-    for (const r of vecResults) {
-      // sqlite-vec returns distance (lower = more similar). Convert to similarity.
-      vecScores.set(r.item_id, Math.max(0, 1 - r.distance));
-    }
-  } else if (useInMemoryCosine && queryEmbedding) {
-    // Fallback: in-memory cosine using cached embeddings
-    for (const entry of index.entries) {
-      const embedding = await getEmbedding(entry, provider);
-      if (embedding?.length) {
-        const sim = cosineSimilarity(queryEmbedding, embedding);
-        if (sim > 0) {
-          vecScores.set(entry.id, sim);
-        }
+    queryEmbeddingGenerated = queryEmbedding !== null;
+    if (queryEmbedding) {
+      const vecResults = await storage.vecSearch(toFloat32Array(queryEmbedding), limit * 3);
+      for (const r of vecResults) {
+        // sqlite-vec returns distance (lower = more similar). Convert to similarity.
+        vecScores.set(r.item_id, Math.max(0, 1 - r.distance));
       }
     }
   }
@@ -424,10 +395,12 @@ async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
   const candidateIds = new Set<string>([...ftsScores.keys(), ...vecScores.keys()]);
 
   const results: SearchResult[] = [];
+  const debugScores: Array<{ id: string; fts_score: number; vec_score: number; combined_score: number }> = [];
+
   for (const id of candidateIds) {
     let entry = entryMap.get(id);
 
-    // If not in legacy index, resolve from l2_items directly
+    // If not in blob index, resolve from l2_items directly
     if (!entry) {
       const stored = await storage.readL2Item(id);
       if (!stored) continue;
@@ -475,6 +448,10 @@ async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
       path: entry.path,
       score,
     });
+
+    if (debug) {
+      debugScores.push({ id: entry.id, fts_score: kw, vec_score: sem, combined_score: score });
+    }
   }
 
   results.sort((a, b) => b.score - a.score);
@@ -482,110 +459,46 @@ async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
 
   for (const r of finalResults) await storage.recordAccess(r.id);
 
+  if (debug) {
+    // Sort debug scores to match result order
+    const resultIds = new Set(finalResults.map((r) => r.id));
+    const filteredDebugScores = debugScores
+      .filter((d) => resultIds.has(d.id))
+      .sort((a, b) => b.combined_score - a.combined_score);
+
+    return {
+      results: finalResults,
+      diagnostics: {
+        search_path: 'sql',
+        vec_available: vecAvailable,
+        vec_used: useVec && queryEmbeddingGenerated,
+        query_embedding_generated: queryEmbeddingGenerated,
+        fts_candidates: ftsScores.size,
+        vec_candidates: vecScores.size,
+        blob_index_entries: index.entries.length,
+        results: filteredDebugScores,
+      },
+    };
+  }
+
   return finalResults;
 }
 
-/**
- * Legacy search path: in-memory keyword + optional cosine similarity.
- * Used for JSON provider or when FTS5 is not populated.
- */
-async function searchLegacy(options: SearchOptions): Promise<SearchResult[]> {
-  const { query, type, tags, limit = 20, semantic = true } = options;
-  const index = await loadIndex();
-
-  const provider = getDefaultProvider();
-  const hasEmbeddings = index.entries.some((e) => e.embedding?.length || embeddingCache.has(e.id));
-  const canGenerateEmbeddings = provider.dimensions() > 0;
-  const useSemanticSearch = semantic && query && (hasEmbeddings || canGenerateEmbeddings);
-
-  let queryEmbedding: number[] | null = null;
-  if (useSemanticSearch) {
-    queryEmbedding = await getCachedEmbedding(query, provider);
-  }
-
-  const results: SearchResult[] = [];
-
-  for (const entry of index.entries) {
-    if (type && entry.type !== type) continue;
-
-    if (tags && tags.length > 0) {
-      const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
-      if (!hasMatchingTag) continue;
-    }
-
-    let keywordScore = 0;
-    let semanticScore = 0;
-
-    if (query) {
-      const queryLower = query.toLowerCase();
-      const queryWords = extractKeywords(query);
-
-      if (entry.name.toLowerCase().includes(queryLower)) {
-        keywordScore += 10;
-      }
-
-      for (const word of queryWords) {
-        if (entry.keywords.includes(word)) keywordScore += 1;
-        if (entry.tags.includes(word)) keywordScore += 2;
-      }
-
-      if (queryEmbedding) {
-        const entryEmbedding = await getEmbedding(entry, provider);
-        if (entryEmbedding?.length) {
-          semanticScore = cosineSimilarity(queryEmbedding, entryEmbedding);
-        }
-      }
-
-      const normalizedKeyword = Math.min(keywordScore / 15, 1);
-      const combinedScore = queryEmbedding
-        ? 0.7 * Math.max(semanticScore, normalizedKeyword) + 0.3 * Math.min(semanticScore, normalizedKeyword)
-        : keywordScore;
-
-      if (combinedScore === 0 && keywordScore === 0) continue;
-
-      results.push({
-        id: entry.id,
-        type: entry.type,
-        subtype: entry.subtype,
-        name: entry.name,
-        tags: entry.tags,
-        path: entry.path,
-        score: queryEmbedding ? combinedScore : keywordScore,
-      });
-    } else {
-      results.push({
-        id: entry.id,
-        type: entry.type,
-        subtype: entry.subtype,
-        name: entry.name,
-        tags: entry.tags,
-        path: entry.path,
-        score: 1,
-      });
-    }
-  }
-
-  results.sort((a, b) => b.score - a.score);
-
-  const finalResults = results.slice(0, limit);
-
-  const storage = getStorageProvider();
-  for (const result of finalResults) {
-    await storage.recordAccess(result.id);
-  }
-
-  return finalResults;
+export interface SearchOptionsWithDebug extends SearchOptions {
+  debug: true;
 }
 
 /**
  * Search the L2 index by keyword, type, and/or tags.
- * Automatically selects SQL path (FTS5 + sqlite-vec) or legacy path.
+ * Uses FTS5 BM25 + optional sqlite-vec cosine similarity.
+ * For JSON provider, FTS/vec return empty and search degrades to blob index listing.
+ *
+ * When options.debug is true, returns { results, diagnostics } instead of bare results.
  */
-export async function search(options: SearchOptions): Promise<SearchResult[]> {
-  if (isSqlSearchPath()) {
-    return searchSql(options);
-  }
-  return searchLegacy(options);
+export function search(options: SearchOptionsWithDebug): Promise<{ results: SearchResult[]; diagnostics: SearchDiagnostics }>;
+export function search(options: SearchOptions): Promise<SearchResult[]>;
+export function search(options: SearchOptions): Promise<SearchResult[] | { results: SearchResult[]; diagnostics: SearchDiagnostics }> {
+  return searchImpl(options);
 }
 
 /**

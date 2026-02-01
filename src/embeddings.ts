@@ -40,11 +40,15 @@ export function getConfig(): EmbeddingConfig {
  * Ollama embedding provider.
  * Local, private, Metal-accelerated on Apple Silicon.
  */
+/** Default timeout for Ollama API calls (ms). */
+const OLLAMA_TIMEOUT_MS = 5000;
+
 export class OllamaProvider implements EmbeddingProvider {
   name = 'ollama';
   private url: string;
   private model: string;
   private dims: number | null = null;
+  private available: boolean | null = null;
 
   constructor(url: string, model: string) {
     this.url = url;
@@ -52,25 +56,41 @@ export class OllamaProvider implements EmbeddingProvider {
   }
 
   async embed(text: string): Promise<number[]> {
-    const response = await fetch(`${this.url}/api/embeddings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: this.model, prompt: text }),
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
 
-    if (!response.ok) {
-      throw new Error(`Ollama embedding failed: ${response.status} ${response.statusText}`);
+    try {
+      const response = await fetch(`${this.url}/api/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: this.model, prompt: text }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Ollama embedding failed: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const embedding = data.embedding as number[];
+
+      // Cache dimensions on first call
+      if (this.dims === null) {
+        this.dims = embedding.length;
+      }
+
+      this.available = true;
+      return embedding;
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        this.available = false;
+        throw new Error(`Ollama embedding timed out after ${OLLAMA_TIMEOUT_MS}ms`);
+      }
+      this.available = false;
+      throw e;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const data = await response.json();
-    const embedding = data.embedding as number[];
-
-    // Cache dimensions on first call
-    if (this.dims === null) {
-      this.dims = embedding.length;
-    }
-
-    return embedding;
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
@@ -84,16 +104,37 @@ export class OllamaProvider implements EmbeddingProvider {
   }
 
   async isAvailable(): Promise<boolean> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+
     try {
-      const response = await fetch(`${this.url}/api/tags`, { method: 'GET' });
-      if (!response.ok) return false;
+      const response = await fetch(`${this.url}/api/tags`, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        this.available = false;
+        return false;
+      }
 
       const data = await response.json();
       const models = (data.models || []) as Array<{ name: string }>;
-      return models.some((m) => m.name.startsWith(this.model));
+      this.available = models.some((m) => m.name.startsWith(this.model));
+      return this.available;
     } catch {
+      this.available = false;
       return false;
+    } finally {
+      clearTimeout(timeout);
     }
+  }
+
+  /**
+   * Returns cached availability from last embed/isAvailable call.
+   * null means never checked.
+   */
+  lastKnownAvailable(): boolean | null {
+    return this.available;
   }
 
   modelName(): string {
