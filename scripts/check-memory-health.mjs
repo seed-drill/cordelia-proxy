@@ -3,7 +3,8 @@
  * Cordelia Memory Health Check
  *
  * Run BEFORE and AFTER upgrades to catch memory integrity issues.
- * Operates on live data (read-only). Does NOT modify anything.
+ * Operates on live data. Checks 10-11 perform a write/delete round-trip
+ * using a canary item that is always cleaned up.
  *
  * Checks:
  *   1. L1 duplicate user_ids (e.g. russell + russwing)
@@ -14,6 +15,9 @@
  *   6. L2 index count vs item count
  *   7. Chain integrity (hash verification)
  *   8. Session count sanity
+ *   9. L2 search functional
+ *  10. L2 write/read/delete round-trip (canary test)
+ *  11. L2 write rejects invalid schema (negative test)
  *
  * Exit 0 = all pass, Exit 1 = any fail, Exit 2 = any warn (no fail)
  *
@@ -405,7 +409,97 @@ async function main() {
     });
 
     // -----------------------------------------------------------------------
-    // CHECK 9: Group membership consistency
+    // CHECK 10: L2 write/read/delete round-trip (canary test)
+    // -----------------------------------------------------------------------
+    await runCheck('L2 write/read/delete round-trip', 'FAIL', async () => {
+      const canaryContent = 'healthcheck-canary-' + Date.now();
+
+      // Write
+      const writeResp = await sendRequest(child, rl, makeRequest('tools/call', {
+        name: 'memory_write_warm',
+        arguments: {
+          type: 'learning',
+          data: {
+            type: 'insight',
+            content: canaryContent,
+            confidence: 0.1,
+            tags: ['healthcheck', 'canary'],
+          },
+        },
+      }));
+      const writeData = parseContent(writeResp);
+      assert(writeData.success === true, `Write failed: ${JSON.stringify(writeData)}`);
+      assert(writeData.id, 'Write returned no id');
+
+      // Read back
+      const readResp = await sendRequest(child, rl, makeRequest('tools/call', {
+        name: 'memory_read_warm',
+        arguments: { id: writeData.id },
+      }));
+      const readData = parseContent(readResp);
+      assert(readData.content === canaryContent,
+        `Read-back mismatch: expected "${canaryContent}", got "${readData.content}"`);
+
+      // Delete (cleanup)
+      const deleteResp = await sendRequest(child, rl, makeRequest('tools/call', {
+        name: 'memory_delete_warm',
+        arguments: { id: writeData.id },
+      }));
+      const deleteData = parseContent(deleteResp);
+      assert(deleteData.success === true, `Delete failed: ${JSON.stringify(deleteData)}`);
+
+      // Verify deletion
+      const verifyResp = await sendRequest(child, rl, makeRequest('tools/call', {
+        name: 'memory_read_warm',
+        arguments: { id: writeData.id },
+      }));
+      const verifyData = tryParseContent(verifyResp);
+      assert(!verifyData || verifyData.error,
+        `Item still readable after delete: ${JSON.stringify(verifyData)}`);
+    });
+
+    // -----------------------------------------------------------------------
+    // CHECK 11: L2 write rejects invalid schema (negative test)
+    // -----------------------------------------------------------------------
+    await runCheck('L2 write rejects invalid learning type', 'FAIL', async () => {
+      const resp = await sendRequest(child, rl, makeRequest('tools/call', {
+        name: 'memory_write_warm',
+        arguments: {
+          type: 'learning',
+          data: {
+            type: 'not_a_valid_type',
+            content: 'should be rejected',
+          },
+        },
+      }));
+      const data = tryParseContent(resp);
+      // Should get an error - either MCP error or validation_failed in content
+      const isRejected = resp?.error ||
+        (data && typeof data === 'object' && 'error' in data) ||
+        (data && JSON.stringify(data).includes('validation_failed'));
+      assert(isRejected, 'Invalid learning type was accepted (should have been rejected)');
+    });
+
+    await runCheck('L2 write rejects missing content field', 'FAIL', async () => {
+      const resp = await sendRequest(child, rl, makeRequest('tools/call', {
+        name: 'memory_write_warm',
+        arguments: {
+          type: 'learning',
+          data: {
+            type: 'insight',
+            // content deliberately omitted
+          },
+        },
+      }));
+      const data = tryParseContent(resp);
+      const isRejected = resp?.error ||
+        (data && typeof data === 'object' && 'error' in data) ||
+        (data && JSON.stringify(data).includes('validation_failed'));
+      assert(isRejected, 'Missing content field was accepted (should have been rejected)');
+    });
+
+    // -----------------------------------------------------------------------
+    // CHECK 12: Group membership consistency
     // -----------------------------------------------------------------------
     await runCheck('Group membership includes active users', 'WARN', async () => {
       const groupListResp = await sendRequest(child, rl, makeRequest('tools/call', {

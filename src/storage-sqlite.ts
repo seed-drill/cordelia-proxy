@@ -476,6 +476,13 @@ export class SqliteStorageProvider implements StorageProvider {
 
   async deleteL2Item(id: string): Promise<boolean> {
     const result = this.db.prepare('DELETE FROM l2_items WHERE id = ?').run(id);
+    if (result.changes > 0) {
+      // Cascade to FTS and vec to prevent orphaned index entries
+      this.db.prepare('DELETE FROM l2_fts WHERE item_id = ?').run(id);
+      if (this.vecLoaded) {
+        this.db.prepare('DELETE FROM l2_vec WHERE item_id = ?').run(id);
+      }
+    }
     return result.changes > 0;
   }
 

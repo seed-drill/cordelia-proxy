@@ -22,6 +22,7 @@ import {
   type EncryptedPayload,
 } from './crypto.js';
 import { getStorageProvider } from './storage.js';
+import { computeContentHash, computeChainHash } from './integrity.js';
 import type { SqliteStorageProvider } from './storage-sqlite.js';
 import { getDefaultProvider } from './embeddings.js';
 
@@ -208,6 +209,19 @@ async function writeHotContext(
     } catch (e) {
       return { error: `validation_failed: ${(e as Error).message}` };
     }
+  }
+
+  // Recompute chain hash after any content change (patch or replace).
+  // Patch callers (e.g. /persist, memory_write_hot from Claude) don't include
+  // the integrity block, so the chain_hash becomes stale when content changes.
+  // Recomputing here ensures the chain is always valid for verification.
+  if (operation === 'patch' && newContext.ephemeral?.integrity) {
+    const contentHash = computeContentHash(newContext as unknown as Record<string, unknown>);
+    newContext.ephemeral.integrity.chain_hash = computeChainHash(
+      newContext.ephemeral.integrity.previous_hash,
+      newContext.ephemeral.session_count,
+      contentHash
+    );
   }
 
   const changes = computeChanges(
