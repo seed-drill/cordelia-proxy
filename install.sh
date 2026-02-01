@@ -170,10 +170,11 @@ step "Configuring global MCP server..."
 GLOBAL_MCP="$HOME/.claude.json"
 
 # Build the env object based on embeddings setting
+MEMORY_ROOT="$HOME/.cordelia/memory"
 if [ "$NO_EMBEDDINGS" = true ]; then
-    ENV_JSON="{\"CORDELIA_ENCRYPTION_KEY\": \"$ENCRYPTION_KEY\", \"CORDELIA_EMBEDDING_PROVIDER\": \"none\", \"CORDELIA_STORAGE\": \"sqlite\"}"
+    ENV_JSON="{\"CORDELIA_ENCRYPTION_KEY\": \"$ENCRYPTION_KEY\", \"CORDELIA_EMBEDDING_PROVIDER\": \"none\", \"CORDELIA_STORAGE\": \"sqlite\", \"CORDELIA_MEMORY_ROOT\": \"$MEMORY_ROOT\"}"
 else
-    ENV_JSON="{\"CORDELIA_ENCRYPTION_KEY\": \"$ENCRYPTION_KEY\", \"CORDELIA_STORAGE\": \"sqlite\"}"
+    ENV_JSON="{\"CORDELIA_ENCRYPTION_KEY\": \"$ENCRYPTION_KEY\", \"CORDELIA_STORAGE\": \"sqlite\", \"CORDELIA_MEMORY_ROOT\": \"$MEMORY_ROOT\"}"
 fi
 
 # Use node to safely merge with existing config
