@@ -282,8 +282,8 @@ IDENTEOF
     fi
 fi
 
-# Ensure salt directory and file exist
-SALT_DIR="$CORDELIA_DIR/memory/L2-warm/.salt"
+# Ensure salt directory and file exist (in memory_root, not repo tree)
+SALT_DIR="$CORDELIA_CONFIG_DIR/memory/L2-warm/.salt"
 SALT_FILE="$SALT_DIR/global.salt"
 mkdir -p "$SALT_DIR"
 if [ ! -f "$SALT_FILE" ]; then
@@ -300,13 +300,6 @@ fi
 node "$CORDELIA_DIR/scripts/seed-l1.mjs" "$USER_ID"
 info "L1 context seeded via MCP"
 
-# Stop the sidecar started by seed script (clean slate for first real session)
-SIDECAR_PID_FILE="$HOME/.cordelia/http-server.pid"
-if [ -f "$SIDECAR_PID_FILE" ]; then
-    SIDECAR_PID=$(cat "$SIDECAR_PID_FILE")
-    kill "$SIDECAR_PID" 2>/dev/null || true
-    rm -f "$SIDECAR_PID_FILE"
-fi
 
 # ============================================
 # Step 6: Configure Claude Code hooks

@@ -1,16 +1,23 @@
 #!/usr/bin/env node
 /**
- * Seed L1 hot context for a new user via the MCP server.
+ * Seed L1 hot context for a new user directly via storage + crypto layers.
  *
- * Uses the same ensureServer + MCP client path that hooks use,
- * so L1 is written to SQLite through the proper storage layer
- * with encryption.
+ * Bypasses MCP (which requires an existing user for write_hot) and writes
+ * the initial L1 context directly to SQLite with encryption.
  *
  * Usage: CORDELIA_ENCRYPTION_KEY="..." node scripts/seed-l1.mjs <user_id>
  */
-import { ensureServer } from '../hooks/server-manager.mjs';
-import { createMcpClient, readL1, writeL1 } from '../hooks/mcp-client.mjs';
-import { getEncryptionKey, getMemoryRoot } from '../hooks/lib.mjs';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
+const distDir = join(__dirname, '..', 'dist');
+
+// Import compiled modules from dist/
+const { initStorageProvider, getStorageProvider } = await import(join(distDir, 'storage.js'));
+const { initCrypto, getDefaultCryptoProvider } = await import(join(distDir, 'crypto.js'));
+const { getMemoryRoot, getEncryptionKey } = await import(join(__dirname, '..', 'hooks', 'lib.mjs'));
 
 const userId = process.argv[2];
 if (!userId) {
@@ -60,28 +67,42 @@ const l1Template = {
 };
 
 try {
-  const passphrase = getEncryptionKey();
+  const passphrase = await getEncryptionKey();
   const memoryRoot = await getMemoryRoot();
 
-  // Start sidecar (or connect to existing)
-  const { baseUrl } = await ensureServer(passphrase, memoryRoot);
-
-  // Connect MCP client
-  const client = await createMcpClient(baseUrl);
+  // Initialize storage (SQLite)
+  process.env.CORDELIA_STORAGE = process.env.CORDELIA_STORAGE || 'sqlite';
+  await initStorageProvider(memoryRoot);
+  const storage = getStorageProvider();
 
   // Check if L1 already exists
-  const existing = await readL1(client, userId);
+  const existing = await storage.readL1(userId);
   if (existing) {
     console.log(`L1 context already exists for ${userId} - skipping seed`);
-    await client.close();
+    await storage.close();
     process.exit(0);
   }
 
-  // Write L1 via MCP (goes through encryption + SQLite)
-  await writeL1(client, userId, 'replace', l1Template);
+  // Initialize crypto
+  const saltPath = join(memoryRoot, 'L2-warm', '.salt', 'global.salt');
+  const salt = readFileSync(saltPath);
+  await initCrypto(passphrase, salt);
+  const crypto = getDefaultCryptoProvider();
+
+  // Encrypt and write L1
+  const plaintext = Buffer.from(JSON.stringify(l1Template, null, 2), 'utf-8');
+  let fileContent;
+  if (crypto.isUnlocked() && crypto.name !== 'none') {
+    const encrypted = await crypto.encrypt(plaintext);
+    fileContent = JSON.stringify(encrypted, null, 2);
+  } else {
+    fileContent = JSON.stringify(l1Template, null, 2);
+  }
+
+  await storage.writeL1(userId, Buffer.from(fileContent, 'utf-8'));
   console.log(`L1 context seeded for ${userId}`);
 
-  await client.close();
+  await storage.close();
   process.exit(0);
 } catch (err) {
   console.error(`Failed to seed L1: ${err.message}`);
