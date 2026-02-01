@@ -119,6 +119,31 @@ async function runTests(): Promise<void> {
     }
   })) passed++; else failed++;
 
+  // Test: Details field is written to entity
+  if (await test('writeItem preserves details field', async () => {
+    const result = await l2.writeItem('entity', {
+      type: 'concept',
+      name: 'Connectionist Test',
+      summary: 'Neural network concepts',
+      details: {
+        hardware: 'Trained ANNs on 386DX33',
+        location: 'Manchester 1993',
+      },
+      tags: ['test-details'],
+    });
+    assert('success' in result && result.success === true, 'should create entity');
+
+    const searchResults = await l2.search({ query: 'Connectionist Test' });
+    assert(searchResults.length > 0, 'should find by name');
+
+    const item = await l2.readItem(searchResults[0].id);
+    assert(item !== null, 'should return item');
+    const details = (item as { details?: Record<string, unknown> }).details;
+    assert(details !== undefined, 'should have details');
+    assert(details!.hardware === 'Trained ANNs on 386DX33', 'should preserve hardware detail');
+    assert(details!.location === 'Manchester 1993', 'should preserve location detail');
+  })) passed++; else failed++;
+
   // Test: Rebuild index
   if (await test('rebuildIndex scans files', async () => {
     const result = await l2.rebuildIndex();

@@ -11,6 +11,7 @@ import Database from 'better-sqlite3';
 import * as crypto from 'crypto';
 import * as path from 'path';
 import * as fs from 'fs';
+import { createRequire } from 'module';
 import type { StorageProvider, L2ItemMeta, GroupRow, GroupMemberRow, AccessLogEntry } from './storage.js';
 
 const SCHEMA_VERSION = 4;
@@ -331,7 +332,7 @@ export class SqliteStorageProvider implements StorageProvider {
 
   private loadSqliteVec(): void {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const require = createRequire(import.meta.url);
       const sqliteVec = require('sqlite-vec');
       sqliteVec.load(this.db);
       this.db.exec(`
@@ -341,8 +342,9 @@ export class SqliteStorageProvider implements StorageProvider {
         );
       `);
       this.vecLoaded = true;
-    } catch {
-      // sqlite-vec not available - graceful degradation
+      console.error('Cordelia: sqlite-vec loaded successfully');
+    } catch (e) {
+      console.error(`Cordelia: sqlite-vec not available: ${(e as Error).message}`);
       this.vecLoaded = false;
     }
   }
@@ -385,6 +387,10 @@ export class SqliteStorageProvider implements StorageProvider {
   async readL2Item(id: string): Promise<{ data: Buffer; type: string } | null> {
     const row = this.db.prepare('SELECT data, type FROM l2_items WHERE id = ?').get(id) as { data: Buffer; type: string } | undefined;
     return row ? { data: row.data, type: row.type } : null;
+  }
+
+  listL2ItemIds(): Array<{ id: string; type: string }> {
+    return this.db.prepare('SELECT id, type FROM l2_items').all() as Array<{ id: string; type: string }>;
   }
 
   async writeL2Item(id: string, type: string, data: Buffer, meta: L2ItemMeta): Promise<void> {
@@ -456,9 +462,9 @@ export class SqliteStorageProvider implements StorageProvider {
   async ftsSearch(query: string, limit: number): Promise<Array<{ item_id: string; rank: number }>> {
     if (!query.trim()) return [];
 
-    // Sanitize query: split on whitespace, wrap each token in double quotes
+    // Sanitize query: split on whitespace, wrap each token in double quotes with prefix matching
     const tokens = query.trim().split(/\s+/).filter(Boolean);
-    const safeQuery = tokens.map((t) => `"${t.replace(/"/g, '')}"`).join(' ');
+    const safeQuery = tokens.map((t) => `"${t.replace(/"/g, '')}"*`).join(' ');
 
     if (!safeQuery) return [];
 
@@ -816,6 +822,31 @@ export class SqliteStorageProvider implements StorageProvider {
       return row.cnt > 0;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Count rows in embedding_cache table.
+   */
+  embeddingCacheCount(): number {
+    try {
+      const row = this.db.prepare('SELECT COUNT(*) as cnt FROM embedding_cache').get() as { cnt: number };
+      return row.cnt;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Count rows in l2_vec table.
+   */
+  vecCount(): number {
+    if (!this.vecLoaded) return 0;
+    try {
+      const row = this.db.prepare('SELECT COUNT(*) as cnt FROM l2_vec').get() as { cnt: number };
+      return row.cnt;
+    } catch {
+      return 0;
     }
   }
 }

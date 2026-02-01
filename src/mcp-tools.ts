@@ -22,6 +22,8 @@ import {
   type EncryptedPayload,
 } from './crypto.js';
 import { getStorageProvider } from './storage.js';
+import type { SqliteStorageProvider } from './storage-sqlite.js';
+import { getDefaultProvider } from './embeddings.js';
 
 // --- Module-level state (effectively singletons, previously on CordeliaServer) ---
 
@@ -577,6 +579,15 @@ export function registerCordeliaTools(server: Server): void {
         },
       },
       {
+        name: 'memory_backfill_embeddings',
+        description:
+          'Rebuild FTS and vec indexes from L2 items. Rebuilds FTS keyword index (includes details field) and vec embeddings. Uses cached embeddings where available, generates new ones via Ollama.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {},
+        },
+      },
+      {
         name: 'memory_prefetch_l2',
         description: 'Prefetch top L2 items for faster session start. Returns most recently accessed items from user groups and private memory. Context-aware: prioritizes bound group if context binding exists.',
         inputSchema: {
@@ -711,14 +722,29 @@ export function registerCordeliaTools(server: Server): void {
         }
 
         const l2Index = await l2.loadIndex();
-        const l2Stats = {
+        const l2Stats: Record<string, unknown> = {
           status: 'active',
           entries: l2Index.entries.length,
           entities: l2Index.entries.filter((e) => e.type === 'entity').length,
           sessions: l2Index.entries.filter((e) => e.type === 'session').length,
           learnings: l2Index.entries.filter((e) => e.type === 'learning').length,
-          embedding_cache_size: l2.getEmbeddingCacheSize(),
+          embedding_cache_size_memory: l2.getEmbeddingCacheSize(),
         };
+
+        // Enhanced diagnostics for SQLite provider
+        const storage = getStorageProvider();
+        if (storage.name === 'sqlite') {
+          const sqliteProvider = storage as SqliteStorageProvider;
+          l2Stats.embedding_cache_size_db = sqliteProvider.embeddingCacheCount();
+          l2Stats.vec_available = sqliteProvider.vecAvailable();
+          l2Stats.vec_count = sqliteProvider.vecCount();
+        }
+
+        // Embedding provider info
+        const embeddingProvider = getDefaultProvider();
+        l2Stats.embedding_provider = embeddingProvider.name;
+        l2Stats.embedding_model = embeddingProvider.modelName();
+        l2Stats.embedding_dimensions = embeddingProvider.dimensions();
 
         const cryptoProvider = getDefaultCryptoProvider();
         const encryptionStatus = {
@@ -1121,6 +1147,25 @@ export function registerCordeliaTools(server: Server): void {
         });
 
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+
+      case 'memory_backfill_embeddings': {
+        try {
+          const result = await l2.backfillVec();
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({ success: true, ...result }),
+            }],
+          };
+        } catch (e) {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({ error: (e as Error).message }),
+            }],
+          };
+        }
       }
 
       case 'memory_prefetch_l2': {

@@ -16,8 +16,10 @@ import {
   initCrypto,
 } from './crypto.js';
 import { initStorageProvider } from './storage.js';
+import type { SqliteStorageProvider } from './storage-sqlite.js';
 import { InlinePolicyEngine, setPolicyEngine } from './policy.js';
 import { periodicCheck } from './integrity.js';
+import { getDefaultProvider } from './embeddings.js';
 import * as l2 from './l2.js';
 
 const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT || path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory');
@@ -63,6 +65,27 @@ async function main(): Promise<void> {
 
   // Initialize encryption if configured
   await initEncryption();
+
+  // Startup health checks
+  if (storageProvider.name === 'sqlite') {
+    const sqliteProvider = storageProvider as SqliteStorageProvider;
+    const vecOk = sqliteProvider.vecAvailable();
+    const cacheCount = sqliteProvider.embeddingCacheCount();
+    const vecRows = sqliteProvider.vecCount();
+    console.error(`Cordelia: sqlite-vec available: ${vecOk}`);
+    console.error(`Cordelia: embedding cache: ${cacheCount} entries, vec table: ${vecRows} rows`);
+
+    const embeddingProvider = getDefaultProvider();
+    if (embeddingProvider.dimensions() > 0) {
+      embeddingProvider.isAvailable().then((ok) => {
+        console.error(`Cordelia: embedding provider (${embeddingProvider.name}/${embeddingProvider.modelName()}): ${ok ? 'available' : 'UNAVAILABLE'}`);
+      }).catch(() => {
+        console.error(`Cordelia: embedding provider (${embeddingProvider.name}): UNAVAILABLE`);
+      });
+    } else {
+      console.error('Cordelia: embedding provider: disabled');
+    }
+  }
 
   // Start periodic integrity check (default: 30 min)
   const integrityIntervalMs = parseInt(process.env.CORDELIA_INTEGRITY_INTERVAL_MS || '1800000', 10);

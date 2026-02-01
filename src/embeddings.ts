@@ -181,6 +181,19 @@ export function cosineSimilarity(a: number[], b: number[]): number {
  * Generate searchable text from an item's fields.
  * Combines relevant fields for embedding.
  */
+/**
+ * Recursively extract string values from an object/array.
+ * Flattens nested structures into a single array of strings.
+ */
+export function extractStringValues(obj: unknown): string[] {
+  if (typeof obj === 'string') return [obj];
+  if (Array.isArray(obj)) return obj.flatMap(extractStringValues);
+  if (obj && typeof obj === 'object') {
+    return Object.values(obj).flatMap(extractStringValues);
+  }
+  return [];
+}
+
 export function getEmbeddableText(fields: {
   name?: string;
   summary?: string;
@@ -190,6 +203,7 @@ export function getEmbeddableText(fields: {
   highlights?: string[];
   aliases?: string[];
   tags?: string[];
+  details?: Record<string, unknown>;
 }): string {
   const parts: string[] = [];
 
@@ -200,6 +214,9 @@ export function getEmbeddableText(fields: {
   if (fields.focus) parts.push(fields.focus);
   if (fields.highlights?.length) parts.push(fields.highlights.join('. '));
   if (fields.aliases?.length) parts.push(fields.aliases.join(', '));
+  if (fields.details && Object.keys(fields.details).length > 0) {
+    parts.push(extractStringValues(fields.details).join('. '));
+  }
   if (fields.tags?.length) parts.push(fields.tags.join(', '));
 
   return parts.join('. ');

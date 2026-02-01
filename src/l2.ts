@@ -27,6 +27,7 @@ import {
   getDefaultProvider,
   cosineSimilarity,
   getEmbeddableText,
+  extractStringValues,
   type EmbeddingProvider,
 } from './embeddings.js';
 import {
@@ -180,7 +181,8 @@ async function getCachedEmbedding(
     embeddingCache.set(memKey, embedding);
 
     return embedding;
-  } catch {
+  } catch (e) {
+    console.error(`Cordelia: embedding generation failed: ${(e as Error).message}`);
     return null;
   }
 }
@@ -197,6 +199,7 @@ function buildEmbeddableText(validated: L2Item, name: string, tags: string[]): s
     focus: (validated as { focus?: string }).focus,
     highlights: (validated as { highlights?: string[] }).highlights,
     aliases: (validated as { aliases?: string[] }).aliases,
+    details: (validated as { details?: Record<string, unknown> }).details,
     tags,
   });
 }
@@ -388,11 +391,7 @@ async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
   let queryEmbedding: number[] | null = null;
 
   if (useVec || useInMemoryCosine) {
-    try {
-      queryEmbedding = await provider.embed(query);
-    } catch {
-      queryEmbedding = null;
-    }
+    queryEmbedding = await getCachedEmbedding(query, provider);
   }
 
   if (useVec && queryEmbedding) {
@@ -422,8 +421,27 @@ async function searchSql(options: SearchOptions): Promise<SearchResult[]> {
 
   const results: SearchResult[] = [];
   for (const id of candidateIds) {
-    const entry = entryMap.get(id);
-    if (!entry) continue;
+    let entry = entryMap.get(id);
+
+    // If not in legacy index, resolve from l2_items directly
+    if (!entry) {
+      const stored = await storage.readL2Item(id);
+      if (!stored) continue;
+      const item = await readItem(id);
+      if (!item) continue;
+      const resolvedType = stored.type as L2ItemType;
+      const resolvedName = (item as { name?: string }).name || (item as { focus?: string }).focus || id;
+      const resolvedTags = ((item as { tags?: string[] }).tags || []).map((t) => t.toLowerCase());
+      entry = {
+        id,
+        type: resolvedType,
+        name: resolvedName,
+        tags: resolvedTags,
+        keywords: [],
+        path: `${resolvedType}s/${id}.json`,
+        visibility: 'private' as const,
+      };
+    }
 
     // Type filter
     if (type && entry.type !== type) continue;
@@ -478,11 +496,7 @@ async function searchLegacy(options: SearchOptions): Promise<SearchResult[]> {
 
   let queryEmbedding: number[] | null = null;
   if (useSemanticSearch) {
-    try {
-      queryEmbedding = await provider.embed(query);
-    } catch {
-      queryEmbedding = null;
-    }
+    queryEmbedding = await getCachedEmbedding(query, provider);
   }
 
   const results: SearchResult[] = [];
@@ -583,13 +597,6 @@ function _getItemPath(type: L2ItemType, id: string): string {
  * Handles decryption if the item is encrypted.
  */
 export async function readItem(id: string): Promise<L2Item | null> {
-  const index = await loadIndex();
-  const entry = index.entries.find((e) => e.id === id);
-
-  if (!entry) {
-    return null;
-  }
-
   const storage = getStorageProvider();
 
   try {
@@ -597,6 +604,15 @@ export async function readItem(id: string): Promise<L2Item | null> {
 
     if (!stored) {
       return null;
+    }
+
+    // Determine type: SQLite storage returns type directly, JSON needs index lookup
+    let itemType: string = stored.type;
+    if (!itemType) {
+      const index = await loadIndex();
+      const entry = index.entries.find((e) => e.id === id);
+      if (!entry) return null;
+      itemType = entry.type;
     }
 
     let parsed = JSON.parse(stored.data.toString('utf-8'));
@@ -615,7 +631,7 @@ export async function readItem(id: string): Promise<L2Item | null> {
     await storage.recordAccess(id);
 
     // Validate based on type
-    switch (entry.type) {
+    switch (itemType) {
       case 'entity':
         return L2EntitySchema.parse(parsed);
       case 'session':
@@ -653,6 +669,7 @@ function extractName(type: L2ItemType, validated: L2Item): string {
  * Build keyword source text from validated item.
  */
 function buildKeywordSources(validated: L2Item, name: string): string {
+  const details = (validated as { details?: Record<string, unknown> }).details;
   return [
     name,
     (validated as { summary?: string }).summary || '',
@@ -660,6 +677,7 @@ function buildKeywordSources(validated: L2Item, name: string): string {
     (validated as { context?: string }).context || '',
     ...(validated as { highlights?: string[] }).highlights || [],
     ...(validated as { aliases?: string[] }).aliases || [],
+    ...(details ? extractStringValues(details) : []),
   ].join(' ');
 }
 
@@ -1024,6 +1042,85 @@ export async function sweepExpiredItems(): Promise<{ swept: number }> {
   }
 
   return { swept };
+}
+
+/**
+ * Backfill l2_vec from existing L2 index entries.
+ * Uses cached embeddings where available, generates new ones via provider.
+ * Returns counts of items processed, cached hits, generated, and errors.
+ */
+export async function backfillVec(): Promise<{
+  total: number;
+  cached: number;
+  generated: number;
+  skipped: number;
+  errors: number;
+  fts_updated: number;
+}> {
+  const storage = getStorageProvider();
+  if (storage.name !== 'sqlite') {
+    return { total: 0, cached: 0, generated: 0, skipped: 0, errors: 0, fts_updated: 0 };
+  }
+
+  const sqliteStorage = storage as SqliteStorageProvider;
+  const vecAvailable = sqliteStorage.vecAvailable();
+  const provider = getDefaultProvider();
+  const canEmbed = vecAvailable && provider.dimensions() > 0;
+
+  // Iterate l2_items directly (not the legacy l2_index blob)
+  const allItems = sqliteStorage.listL2ItemIds();
+  let cached = 0;
+  let generated = 0;
+  let skipped = 0;
+  let errors = 0;
+  let ftsUpdated = 0;
+
+  for (const entry of allItems) {
+    try {
+      const item = await readItem(entry.id);
+      if (!item) {
+        skipped++;
+        continue;
+      }
+
+      const name = extractName(entry.type as L2ItemType, item);
+      const tags = (item as { tags?: string[] }).tags || [];
+
+      // Rebuild FTS entry with current field extraction (includes details)
+      const keywordSources = buildKeywordSources(item, name);
+      const lowerTags = tags.map((t) => t.toLowerCase());
+      await sqliteStorage.ftsUpsert(entry.id, name, keywordSources, lowerTags.join(' '));
+      ftsUpdated++;
+
+      // Rebuild vec entry if available
+      if (canEmbed) {
+        const embeddableText = buildEmbeddableText(item, name, tags);
+        const hash = contentHash(embeddableText);
+        const existingCached = await sqliteStorage.getEmbedding(hash, provider.name, provider.modelName());
+
+        let embedding: number[];
+        if (existingCached) {
+          embedding = bufferToEmbedding(existingCached);
+          cached++;
+        } else {
+          const gen = await getCachedEmbedding(embeddableText, provider);
+          if (!gen) {
+            skipped++;
+            continue;
+          }
+          embedding = gen;
+          generated++;
+        }
+
+        await sqliteStorage.vecUpsert(entry.id, toFloat32Array(embedding));
+      }
+    } catch (e) {
+      console.error(`Cordelia: backfill error for ${entry.id}: ${(e as Error).message}`);
+      errors++;
+    }
+  }
+
+  return { total: allItems.length, cached, generated, skipped, errors, fts_updated: ftsUpdated };
 }
 
 /**
