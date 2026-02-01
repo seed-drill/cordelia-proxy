@@ -189,7 +189,10 @@ async function writeHotContext(
   let newContext: L1HotContext;
 
   if (operation === 'replace') {
-    const merged = { ...data, version: 1, updated_at: newUpdatedAt };
+    // For replace, honour the caller's updated_at if provided (hooks compute
+    // chain hashes against their own timestamp). Fall back to server time.
+    const replaceUpdatedAt = typeof data.updated_at === 'string' ? data.updated_at : newUpdatedAt;
+    const merged = { ...data, version: 1, updated_at: replaceUpdatedAt };
     try {
       newContext = L1HotContextSchema.parse(merged);
     } catch (e) {
