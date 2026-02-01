@@ -126,7 +126,7 @@ fi
 if ! command -v claude &> /dev/null; then
     if [ "$OS" = "linux" ]; then
         warn "Claude Code not found. Installing via npm..."
-        npm install -g @anthropic-ai/claude-code
+        sudo npm install -g @anthropic-ai/claude-code
         if command -v claude &> /dev/null; then
             info "Claude Code installed via npm"
         else
@@ -296,6 +296,9 @@ addr = "boot1.cordelia.seeddrill.io:9474"
 
 [[network.bootnodes]]
 addr = "boot2.cordelia.seeddrill.io:9474"
+
+[[network.bootnodes]]
+addr = "moltbot.cordelia.seeddrill.io:9475"
 
 [governor]
 hot_min = 2
