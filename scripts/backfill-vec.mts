@@ -58,7 +58,8 @@ console.log(`  Vec rows now: ${sqliteStorage.vecCount()}`);
 
 // Debug: check FTS state
 console.log(`\nFTS count: ${sqliteStorage.hasFtsData()}`);
-console.log(`FTS rows: ${(sqliteStorage as any).db.prepare('SELECT COUNT(*) as cnt FROM l2_fts').get().cnt}`);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+console.log(`FTS rows: ${(sqliteStorage as unknown as Record<string, any>).db.prepare('SELECT COUNT(*) as cnt FROM l2_fts').get().cnt}`);
 
 // Verification searches
 for (const q of ['Manchester Hinton', '386', '386DX33', 'Reagan movie actor']) {
