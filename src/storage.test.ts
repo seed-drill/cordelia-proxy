@@ -458,7 +458,7 @@ describe('SQLite vec search', () => {
     const results = await provider.vecSearch(embedding, 5);
     assert.strictEqual(results.length, 1);
     assert.strictEqual(results[0].item_id, 'vec-test-1');
-    assert.strictEqual(results[0].distance, 0, 'identical embedding should have 0 distance');
+    assert.ok(results[0].distance < 1e-6, `identical embedding should have ~0 distance, got ${results[0].distance}`);
   });
 
   it('should return nearest neighbours in order', async () => {

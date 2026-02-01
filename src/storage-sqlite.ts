@@ -335,14 +335,50 @@ export class SqliteStorageProvider implements StorageProvider {
       const require = createRequire(import.meta.url);
       const sqliteVec = require('sqlite-vec');
       sqliteVec.load(this.db);
-      this.db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS l2_vec USING vec0(
-          item_id TEXT PRIMARY KEY,
-          embedding float[768]
-        );
-      `);
+
+      // Migrate from L2 (Euclidean) to cosine distance metric if needed.
+      // vec0 tables don't expose their config, so check for the sentinel row.
+      const needsMigration = (() => {
+        try {
+          const sentinel = this.db.prepare(
+            "SELECT 1 FROM l2_vec_meta WHERE key = 'distance_metric' AND value = 'cosine'"
+          ).get();
+          return !sentinel;
+        } catch {
+          // l2_vec_meta doesn't exist yet — migration needed
+          return true;
+        }
+      })();
+
+      if (needsMigration) {
+        console.error('Cordelia: migrating l2_vec to cosine distance metric');
+        this.db.exec('DROP TABLE IF EXISTS l2_vec');
+        this.db.exec(`
+          CREATE VIRTUAL TABLE l2_vec USING vec0(
+            item_id TEXT PRIMARY KEY,
+            embedding float[768] distance_metric=cosine
+          );
+        `);
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS l2_vec_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          );
+        `);
+        this.db.prepare(
+          "INSERT OR REPLACE INTO l2_vec_meta (key, value) VALUES ('distance_metric', 'cosine')"
+        ).run();
+      } else {
+        this.db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS l2_vec USING vec0(
+            item_id TEXT PRIMARY KEY,
+            embedding float[768] distance_metric=cosine
+          );
+        `);
+      }
+
       this.vecLoaded = true;
-      console.error('Cordelia: sqlite-vec loaded successfully');
+      console.error('Cordelia: sqlite-vec loaded successfully (cosine distance)');
     } catch (e) {
       console.error(`Cordelia: sqlite-vec not available: ${(e as Error).message}`);
       this.vecLoaded = false;
