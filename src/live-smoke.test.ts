@@ -124,7 +124,7 @@ async function run() {
   // --- Debug mode ---
 
   await test('debug mode returns diagnostics', async () => {
-    const { results, diagnostics } = await l2.search({ query: 'memory', debug: true as const });
+    const { results: _results, diagnostics } = await l2.search({ query: 'memory', debug: true as const });
     assert(diagnostics.search_path === 'sql', 'expected sql search path');
     assert(typeof diagnostics.vec_available === 'boolean', 'vec_available should be boolean');
     assert(typeof diagnostics.fts_candidates === 'number', 'fts_candidates should be number');

@@ -211,7 +211,7 @@ async function writeHotContext(
   // L1 budget enforcement: reject writes that exceed size limits
   const budgetCheck = checkL1Budget(newContext as unknown as Record<string, unknown>);
   if (!budgetCheck.ok) {
-    const budgets = getL1Budgets();
+    const _budgets = getL1Budgets();
     const detail = budgetCheck.violations
       .map((v) => `Section "${v.section}" is ${(v.actual / 1024).toFixed(1)}KB, budget is ${(v.budget / 1024).toFixed(1)}KB`)
       .join('. ');
