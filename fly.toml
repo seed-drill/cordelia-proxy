@@ -30,9 +30,13 @@ primary_region = 'ams'
   [[services.ports]]
     port = 9474
 
-[mounts]
+[[mounts]]
   source = 'cordelia_data'
   destination = '/data'
+  initial_size = '1gb'
+  auto_extend_size_threshold = 80
+  auto_extend_size_increment = '1gb'
+  auto_extend_size_limit = '5gb'
 
 [env]
   CORDELIA_MEMORY_ROOT = '/data/memory'
