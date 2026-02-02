@@ -1,0 +1,36 @@
+[node]
+identity_key = "/data/core/node.key"
+api_transport = "http"
+api_addr = "127.0.0.1:9473"
+database = "/data/core/cordelia.db"
+entity_id = "proxy-keeper"
+role = "keeper"
+groups = ["seeddrill-internal", "shared-xorg"]
+
+[network]
+listen_addr = "0.0.0.0:9474"
+
+[[network.bootnodes]]
+addr = "boot3.cordelia.seeddrill.io:9474"
+
+[[network.bootnodes]]
+addr = "boot4.cordelia.seeddrill.io:9474"
+
+[[network.trusted_relays]]
+addr = "boot3.cordelia.seeddrill.io:9474"
+
+[[network.trusted_relays]]
+addr = "boot4.cordelia.seeddrill.io:9474"
+
+[governor]
+hot_min = 2
+hot_max = 10
+warm_min = 5
+warm_max = 30
+cold_max = 50
+
+[replication]
+sync_interval_moderate_secs = 60
+sync_interval_taciturn_secs = 300
+tombstone_retention_days = 30
+max_batch_size = 100

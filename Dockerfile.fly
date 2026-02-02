@@ -27,8 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy cordelia-core binary from GHCR image
 COPY --from=core-image /usr/local/bin/cordelia-node /usr/local/bin/cordelia-node
 
-# Copy default core config from GHCR image
-COPY --from=core-image /home/cordelia/default-config.toml /home/cordelia/default-config.toml
+# Copy keeper config for embedded node
+COPY fly-node-config.toml /home/cordelia/default-config.toml
 
 # Create app user
 RUN useradd -m -s /bin/bash cordelia
