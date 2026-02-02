@@ -29,7 +29,6 @@ import { getDefaultProvider } from './embeddings.js';
 
 // --- Module-level state (effectively singletons, previously on CordeliaServer) ---
 
-const hotContextCache: Map<string, L1HotContext> = new Map();
 let encryptionEnabled = false;
 
 interface AuditEntry {
@@ -112,13 +111,11 @@ function computeChanges(
 
 async function loadHotContext(
   userId: string,
-  bypassCache = false,
   skipValidation = false
 ): Promise<L1HotContext | null> {
-  if (!bypassCache && hotContextCache.has(userId)) {
-    return hotContextCache.get(userId)!;
-  }
-
+  // Always read from storage -- no in-memory cache.
+  // Multiple processes (stdio MCP + HTTP sidecar) share the same SQLite DB,
+  // so any process-local cache would serve stale data after another process writes.
   try {
     const storage = getStorageProvider();
     const buffer = await storage.readL1(userId);
@@ -143,7 +140,6 @@ async function loadHotContext(
     }
 
     const validated = L1HotContextSchema.parse(parsed);
-    hotContextCache.set(userId, validated);
     return validated;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -168,7 +164,7 @@ async function writeHotContext(
   data: Record<string, unknown>,
   expectedUpdatedAt?: string
 ): Promise<{ success: true; updated_at: string } | { error: string; current_updated_at?: string; detail?: string; known_users?: string[] }> {
-  const current = await loadHotContext(userId, true, true);
+  const current = await loadHotContext(userId, true);
 
   if (!current) {
     let knownUsers: string[] = [];
@@ -258,8 +254,6 @@ async function writeHotContext(
   const storage = getStorageProvider();
   await storage.writeL1(userId, Buffer.from(fileContent, 'utf-8'));
 
-  hotContextCache.delete(userId);
-
   const auditEntries: AuditEntry[] = changes
     .filter((c) => c.path !== 'updated_at')
     .map((c) => ({
@@ -286,10 +280,15 @@ export function setEncryptionEnabled(enabled: boolean): void {
 }
 
 /**
- * Get cached user IDs (for status reporting).
+ * Get known user IDs from storage (for status reporting).
  */
-export function getCachedUserIds(): string[] {
-  return Array.from(hotContextCache.keys());
+export async function getKnownUserIds(): Promise<string[]> {
+  try {
+    const storage = getStorageProvider();
+    return await storage.listL1Users();
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -805,7 +804,7 @@ export function registerCordeliaTools(server: Server): void {
                 status: 'ok',
                 version: '0.3.0',
                 layers: {
-                  L1_hot: { users, cached: getCachedUserIds() },
+                  L1_hot: { users },
                   L2_warm: l2Stats,
                   L3_cold: { status: 'not_implemented' },
                 },
