@@ -291,6 +291,471 @@ export async function getKnownUserIds(): Promise<string[]> {
   }
 }
 
+// --- MCP Tool Response Type ---
+
+type McpToolResponse = {
+  content: Array<{ type: 'text'; text: string }>;
+};
+
+function jsonResponse(data: unknown): McpToolResponse {
+  return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+}
+
+// --- Individual Tool Handlers ---
+
+async function handleMemoryReadHot(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const userId = args.user_id as string;
+  const context = await loadHotContext(userId);
+
+  if (!context) {
+    let knownUsers: string[] = [];
+    try {
+      const storage = getStorageProvider();
+      knownUsers = await storage.listL1Users();
+    } catch {
+      // Storage not ready
+    }
+
+    const detail = knownUsers.length > 0
+      ? `No L1 context found for "${userId}". Known users: [${knownUsers.join(', ')}]. ` +
+        `Check that you're using the L1 storage key (filename), not the identity.id field.`
+      : `No L1 context found for "${userId}". No users found in storage.`;
+
+    return jsonResponse({ error: 'user_not_found', user_id: userId, detail, known_users: knownUsers });
+  }
+
+  return jsonResponse(context);
+}
+
+async function handleMemoryWriteHot(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { user_id, operation, data, expected_updated_at } = args as {
+    user_id: string;
+    operation: 'patch' | 'replace';
+    data: Record<string, unknown>;
+    expected_updated_at?: string;
+  };
+
+  const result = await writeHotContext(user_id, operation, data, expected_updated_at);
+  return jsonResponse(result);
+}
+
+async function handleMemoryStatus(): Promise<McpToolResponse> {
+  let users: string[] = [];
+
+  try {
+    const storage = getStorageProvider();
+    users = await storage.listL1Users();
+  } catch {
+    // Storage not ready yet
+  }
+
+  const l2Index = await l2.loadIndex();
+  const l2Stats: Record<string, unknown> = {
+    status: 'active',
+    entries: l2Index.entries.length,
+    entities: l2Index.entries.filter((e) => e.type === 'entity').length,
+    sessions: l2Index.entries.filter((e) => e.type === 'session').length,
+    learnings: l2Index.entries.filter((e) => e.type === 'learning').length,
+    embedding_cache_size_memory: l2.getEmbeddingCacheSize(),
+  };
+
+  // Enhanced diagnostics for SQLite provider
+  const storage = getStorageProvider();
+  if (storage.name === 'sqlite') {
+    const sqliteProvider = storage as SqliteStorageProvider;
+    l2Stats.embedding_cache_size_db = sqliteProvider.embeddingCacheCount();
+    l2Stats.vec_available = sqliteProvider.vecAvailable();
+    l2Stats.vec_count = sqliteProvider.vecCount();
+    l2Stats.domain_counts = await sqliteProvider.getDomainCounts();
+  }
+
+  // Embedding provider info
+  const embeddingProvider = getDefaultProvider();
+  l2Stats.embedding_provider = embeddingProvider.name;
+  l2Stats.embedding_model = embeddingProvider.modelName();
+  l2Stats.embedding_dimensions = embeddingProvider.dimensions();
+
+  const cryptoProvider = getDefaultCryptoProvider();
+  const encryptionStatus = {
+    enabled: encryptionEnabled,
+    provider: cryptoProvider.name,
+    unlocked: cryptoProvider.isUnlocked(),
+  };
+
+  return jsonResponse({
+    status: 'ok',
+    version: '0.3.0',
+    layers: {
+      L1_hot: { users },
+      L2_warm: l2Stats,
+      L3_cold: { status: 'not_implemented' },
+    },
+    encryption: encryptionStatus,
+  });
+}
+
+async function handleMemoryAnalyzeNovelty(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { text, messages, threshold = 0.7 } = args as {
+    text?: string;
+    messages?: string[];
+    threshold?: number;
+  };
+
+  let result: NoveltyResult;
+
+  if (messages && messages.length > 0) {
+    result = analyzeSession(messages);
+  } else if (text) {
+    result = analyzeNovelty(text);
+  } else {
+    return jsonResponse({ error: 'must_provide_text_or_messages' });
+  }
+
+  const forPersistence = filterForPersistence(result, threshold);
+
+  return jsonResponse({
+    signals: result.signals,
+    score: result.score,
+    extracts: result.extracts,
+    for_persistence: forPersistence,
+  });
+}
+
+async function handleMemorySearch(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { query, type, tags, limit, domain: searchDomain, debug } = args as {
+    query?: string;
+    type?: 'entity' | 'session' | 'learning';
+    tags?: string[];
+    limit?: number;
+    domain?: 'value' | 'procedural' | 'interrupt';
+    debug?: boolean;
+  };
+
+  if (debug) {
+    const { results: debugResults, diagnostics } = await l2.search({ query, type, tags, limit, domain: searchDomain, debug: true as const });
+    return jsonResponse({ results: debugResults, count: debugResults.length, diagnostics });
+  }
+
+  const results = await l2.search({ query, type, tags, limit, domain: searchDomain });
+  return jsonResponse({ results, count: results.length });
+}
+
+async function handleMemoryReadWarm(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { id, entity_id } = args as { id: string; entity_id?: string };
+
+  if (entity_id) {
+    const storage = getStorageProvider();
+    const meta = await storage.readL2ItemMeta(id);
+    if (meta && meta.visibility === 'group' && meta.group_id) {
+      const membership = await storage.getMembership(meta.group_id, entity_id);
+      if (!membership) {
+        return jsonResponse({ error: 'unauthorized', detail: 'not a member of group' });
+      }
+    } else if (meta && meta.visibility === 'private' && meta.owner_id && meta.owner_id !== entity_id) {
+      return jsonResponse({ error: 'unauthorized', detail: 'not owner of private item' });
+    }
+  }
+
+  const item = await l2.readItem(id);
+
+  if (!item) {
+    return jsonResponse({ error: 'not_found', id });
+  }
+
+  return jsonResponse(item);
+}
+
+async function handleMemoryWriteWarm(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { type, data, entity_id, group_id: writeGroupId, domain: writeDomain } = args as {
+    type: 'entity' | 'session' | 'learning';
+    data: Record<string, unknown>;
+    entity_id?: string;
+    group_id?: string;
+    domain?: 'value' | 'procedural' | 'interrupt';
+  };
+
+  if (entity_id && writeGroupId) {
+    const storage = getStorageProvider();
+    const membership = await storage.getMembership(writeGroupId, entity_id);
+    if (!membership) {
+      return jsonResponse({ error: 'unauthorized', detail: 'not a member of group' });
+    }
+    if (membership.role === 'viewer') {
+      return jsonResponse({ error: 'unauthorized', detail: 'viewer cannot write' });
+    }
+    if (membership.posture === 'emcon') {
+      return jsonResponse({ error: 'unauthorized', detail: 'EMCON posture blocks writes' });
+    }
+  }
+
+  const result = await l2.writeItem(type, data, { group_id: writeGroupId, entity_id, domain: writeDomain });
+  return jsonResponse(result);
+}
+
+async function handleMemoryDeleteWarm(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { id, entity_id } = args as { id: string; entity_id?: string };
+
+  if (entity_id) {
+    const storage = getStorageProvider();
+    const meta = await storage.readL2ItemMeta(id);
+    if (meta && meta.visibility === 'group' && meta.group_id) {
+      const membership = await storage.getMembership(meta.group_id, entity_id);
+      if (!membership) {
+        return jsonResponse({ error: 'unauthorized', detail: 'not a member of group' });
+      }
+      if (membership.role !== 'owner' && membership.role !== 'admin' && meta.author_id !== entity_id) {
+        return jsonResponse({ error: 'unauthorized', detail: 'only owner/admin or author can delete group items' });
+      }
+    } else if (meta && meta.visibility === 'private' && meta.owner_id && meta.owner_id !== entity_id) {
+      return jsonResponse({ error: 'unauthorized', detail: 'not owner of private item' });
+    }
+  }
+
+  const result = await l2.deleteItem(id);
+  return jsonResponse(result);
+}
+
+async function handleMemoryBackup(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { destination } = args as { destination?: string };
+  const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT || path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory');
+  const destDir = destination || path.join(MEMORY_ROOT, 'backups');
+
+  try {
+    const { createBackup } = await import('./backup.js');
+    const result = await createBackup(destDir);
+    return jsonResponse({
+      success: true,
+      manifest: result.manifest,
+      size: result.size,
+      duration_ms: result.duration_ms,
+      dbPath: result.dbPath,
+    });
+  } catch (e) {
+    return jsonResponse({ error: (e as Error).message });
+  }
+}
+
+async function handleMemoryRestore(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { source, dry_run } = args as { source: string; dry_run?: boolean };
+
+  try {
+    const { restoreBackup } = await import('./backup.js');
+    const result = await restoreBackup(source, { dryRun: dry_run });
+    return jsonResponse({
+      success: true,
+      items: result.items,
+      schemaVersion: result.schemaVersion,
+      integrity: result.integrityReport.ok ? 'passed' : 'failed',
+      integrityReport: result.integrityReport,
+    });
+  } catch (e) {
+    return jsonResponse({ error: (e as Error).message });
+  }
+}
+
+async function handleMemoryShare(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { item_id, target_group, entity_id } = args as {
+    item_id: string;
+    target_group: string;
+    entity_id: string;
+  };
+  const result = await l2.shareItem(item_id, target_group, entity_id);
+  return jsonResponse(result);
+}
+
+async function handleMemoryGroupCreate(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { id, name: groupName, entity_id, culture } = args as {
+    id: string;
+    name: string;
+    entity_id: string;
+    culture?: Record<string, unknown>;
+  };
+  const storage = getStorageProvider();
+  if (culture && Object.keys(culture).length > 0) {
+    const parsed = GroupCultureSchema.safeParse(culture);
+    if (!parsed.success) {
+      return jsonResponse({ error: `invalid culture: ${parsed.error.message}` });
+    }
+  }
+  const cultureStr = culture ? JSON.stringify(culture) : '{}';
+  try {
+    await storage.createGroup(id, groupName, cultureStr, '{}');
+    await storage.addMember(id, entity_id, 'owner');
+    await storage.logAccess({ entity_id, action: 'create', resource_type: 'group', resource_id: id });
+    return jsonResponse({ success: true, id });
+  } catch (e) {
+    return jsonResponse({ error: (e as Error).message });
+  }
+}
+
+async function handleMemoryGroupList(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { entity_id } = args as { entity_id?: string };
+  const storage = getStorageProvider();
+  let groups = await storage.listGroups();
+  if (entity_id) {
+    const filtered = [];
+    for (const g of groups) {
+      const m = await storage.getMembership(g.id, entity_id);
+      if (m) filtered.push(g);
+    }
+    groups = filtered;
+  }
+  return jsonResponse({ groups, count: groups.length });
+}
+
+async function handleMemoryGroupRead(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { group_id } = args as { group_id: string };
+  const storage = getStorageProvider();
+  const group = await storage.readGroup(group_id);
+  if (!group) {
+    return jsonResponse({ error: 'not_found', group_id });
+  }
+  const members = await storage.listMembers(group_id);
+  return jsonResponse({ ...group, members });
+}
+
+async function handleMemoryGroupAddMember(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { group_id, entity_id, target_entity_id, role = 'member' } = args as {
+    group_id: string;
+    entity_id: string;
+    target_entity_id: string;
+    role?: string;
+  };
+  const storage = getStorageProvider();
+  const requester = await storage.getMembership(group_id, entity_id);
+  if (!requester || (requester.role !== 'owner' && requester.role !== 'admin')) {
+    return jsonResponse({ error: 'unauthorized', detail: 'requires admin or owner role' });
+  }
+  try {
+    await storage.addMember(group_id, target_entity_id, role);
+    await storage.logAccess({ entity_id, action: 'add_member', resource_type: 'group', resource_id: group_id, detail: `added ${target_entity_id} as ${role}` });
+    return jsonResponse({ success: true });
+  } catch (e) {
+    return jsonResponse({ error: (e as Error).message });
+  }
+}
+
+async function handleMemoryGroupRemoveMember(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { group_id, entity_id, target_entity_id } = args as {
+    group_id: string;
+    entity_id: string;
+    target_entity_id: string;
+  };
+  const storage = getStorageProvider();
+  const requester = await storage.getMembership(group_id, entity_id);
+  if (!requester || (requester.role !== 'owner' && requester.role !== 'admin')) {
+    return jsonResponse({ error: 'unauthorized', detail: 'requires admin or owner role' });
+  }
+  const removed = await storage.removeMember(group_id, target_entity_id);
+  if (removed) {
+    await storage.logAccess({ entity_id, action: 'remove_member', resource_type: 'group', resource_id: group_id, detail: `removed ${target_entity_id}` });
+  }
+  return jsonResponse({ success: removed });
+}
+
+async function handleMemoryBindContext(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { user_id, directory, group_id } = args as {
+    user_id: string;
+    directory: string;
+    group_id: string;
+  };
+
+  const storage = getStorageProvider();
+  const group = await storage.readGroup(group_id);
+  if (!group) {
+    return jsonResponse({ error: 'group_not_found', group_id });
+  }
+
+  const ctx = await loadHotContext(user_id);
+  if (!ctx) {
+    return jsonResponse({ error: 'user_not_found', user_id });
+  }
+
+  const bindings = { ...(ctx.active.context_bindings || {}), [directory]: group_id };
+  const result = await writeHotContext(user_id, 'patch', {
+    active: { context_bindings: bindings },
+  });
+
+  return jsonResponse(result);
+}
+
+async function handleMemoryUnbindContext(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { user_id, directory } = args as {
+    user_id: string;
+    directory: string;
+  };
+
+  const ctx = await loadHotContext(user_id);
+  if (!ctx) {
+    return jsonResponse({ error: 'user_not_found', user_id });
+  }
+
+  const bindings = { ...(ctx.active.context_bindings || {}) };
+  delete bindings[directory];
+  const result = await writeHotContext(user_id, 'patch', {
+    active: { context_bindings: Object.keys(bindings).length > 0 ? bindings : undefined },
+  });
+
+  return jsonResponse(result);
+}
+
+async function handleMemoryBackfillEmbeddings(): Promise<McpToolResponse> {
+  try {
+    const result = await l2.backfillVec();
+    return jsonResponse({ success: true, ...result });
+  } catch (e) {
+    return jsonResponse({ error: (e as Error).message });
+  }
+}
+
+async function handleMemoryPrefetchL2(args: Record<string, unknown>): Promise<McpToolResponse> {
+  const { user_id, cwd, limit: prefetchLimit = 10 } = args as {
+    user_id: string;
+    cwd?: string;
+    limit?: number;
+  };
+
+  const ctx = await loadHotContext(user_id);
+  if (!ctx) {
+    return jsonResponse({ error: 'user_not_found', user_id });
+  }
+
+  const items = await l2.prefetchItems(user_id, {
+    cwd,
+    bindings: ctx.active.context_bindings,
+    limit: prefetchLimit,
+  });
+
+  return jsonResponse({ prefetched: items.length, items });
+}
+
+// --- Tool Handler Map ---
+
+type ToolHandler = (args: Record<string, unknown>) => Promise<McpToolResponse>;
+
+const toolHandlers: Record<string, ToolHandler> = {
+  memory_read_hot: handleMemoryReadHot,
+  memory_write_hot: handleMemoryWriteHot,
+  memory_status: handleMemoryStatus,
+  memory_analyze_novelty: handleMemoryAnalyzeNovelty,
+  memory_search: handleMemorySearch,
+  memory_read_warm: handleMemoryReadWarm,
+  memory_write_warm: handleMemoryWriteWarm,
+  memory_delete_warm: handleMemoryDeleteWarm,
+  memory_backup: handleMemoryBackup,
+  memory_restore: handleMemoryRestore,
+  memory_share: handleMemoryShare,
+  memory_group_create: handleMemoryGroupCreate,
+  memory_group_list: handleMemoryGroupList,
+  memory_group_read: handleMemoryGroupRead,
+  memory_group_add_member: handleMemoryGroupAddMember,
+  memory_group_remove_member: handleMemoryGroupRemoveMember,
+  memory_bind_context: handleMemoryBindContext,
+  memory_unbind_context: handleMemoryUnbindContext,
+  memory_backfill_embeddings: handleMemoryBackfillEmbeddings,
+  memory_prefetch_l2: handleMemoryPrefetchL2,
+};
+
 /**
  * Register all Cordelia MCP tools and resource handlers on the given Server.
  * Called by both stdio (server.ts) and HTTP (http-server.ts) transports.
@@ -690,570 +1155,15 @@ export function registerCordeliaTools(server: Server): void {
     };
   });
 
-  // Handle tool calls
+  // Handle tool calls - dispatch to individual handlers
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
-    switch (name) {
-      case 'memory_read_hot': {
-        const userId = (args as { user_id: string }).user_id;
-        const context = await loadHotContext(userId);
-
-        if (!context) {
-          let knownUsers: string[] = [];
-          try {
-            const storage = getStorageProvider();
-            knownUsers = await storage.listL1Users();
-          } catch {
-            // Storage not ready
-          }
-
-          const detail = knownUsers.length > 0
-            ? `No L1 context found for "${userId}". Known users: [${knownUsers.join(', ')}]. ` +
-              `Check that you're using the L1 storage key (filename), not the identity.id field.`
-            : `No L1 context found for "${userId}". No users found in storage.`;
-
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({ error: 'user_not_found', user_id: userId, detail, known_users: knownUsers }),
-              },
-            ],
-          };
-        }
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(context),
-            },
-          ],
-        };
-      }
-
-      case 'memory_write_hot': {
-        const { user_id, operation, data, expected_updated_at } = args as {
-          user_id: string;
-          operation: 'patch' | 'replace';
-          data: Record<string, unknown>;
-          expected_updated_at?: string;
-        };
-
-        const result = await writeHotContext(user_id, operation, data, expected_updated_at);
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result),
-            },
-          ],
-        };
-      }
-
-      case 'memory_status': {
-        let users: string[] = [];
-
-        try {
-          const storage = getStorageProvider();
-          users = await storage.listL1Users();
-        } catch {
-          // Storage not ready yet
-        }
-
-        const l2Index = await l2.loadIndex();
-        const l2Stats: Record<string, unknown> = {
-          status: 'active',
-          entries: l2Index.entries.length,
-          entities: l2Index.entries.filter((e) => e.type === 'entity').length,
-          sessions: l2Index.entries.filter((e) => e.type === 'session').length,
-          learnings: l2Index.entries.filter((e) => e.type === 'learning').length,
-          embedding_cache_size_memory: l2.getEmbeddingCacheSize(),
-        };
-
-        // Enhanced diagnostics for SQLite provider
-        const storage = getStorageProvider();
-        if (storage.name === 'sqlite') {
-          const sqliteProvider = storage as SqliteStorageProvider;
-          l2Stats.embedding_cache_size_db = sqliteProvider.embeddingCacheCount();
-          l2Stats.vec_available = sqliteProvider.vecAvailable();
-          l2Stats.vec_count = sqliteProvider.vecCount();
-          l2Stats.domain_counts = await sqliteProvider.getDomainCounts();
-        }
-
-        // Embedding provider info
-        const embeddingProvider = getDefaultProvider();
-        l2Stats.embedding_provider = embeddingProvider.name;
-        l2Stats.embedding_model = embeddingProvider.modelName();
-        l2Stats.embedding_dimensions = embeddingProvider.dimensions();
-
-        const cryptoProvider = getDefaultCryptoProvider();
-        const encryptionStatus = {
-          enabled: encryptionEnabled,
-          provider: cryptoProvider.name,
-          unlocked: cryptoProvider.isUnlocked(),
-        };
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                status: 'ok',
-                version: '0.3.0',
-                layers: {
-                  L1_hot: { users },
-                  L2_warm: l2Stats,
-                  L3_cold: { status: 'not_implemented' },
-                },
-                encryption: encryptionStatus,
-              }),
-            },
-          ],
-        };
-      }
-
-      case 'memory_analyze_novelty': {
-        const { text, messages, threshold = 0.7 } = args as {
-          text?: string;
-          messages?: string[];
-          threshold?: number;
-        };
-
-        let result: NoveltyResult;
-
-        if (messages && messages.length > 0) {
-          result = analyzeSession(messages);
-        } else if (text) {
-          result = analyzeNovelty(text);
-        } else {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({ error: 'must_provide_text_or_messages' }),
-              },
-            ],
-          };
-        }
-
-        const forPersistence = filterForPersistence(result, threshold);
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                signals: result.signals,
-                score: result.score,
-                extracts: result.extracts,
-                for_persistence: forPersistence,
-              }),
-            },
-          ],
-        };
-      }
-
-      case 'memory_search': {
-        const { query, type, tags, limit, domain: searchDomain, debug } = args as {
-          query?: string;
-          type?: 'entity' | 'session' | 'learning';
-          tags?: string[];
-          limit?: number;
-          domain?: 'value' | 'procedural' | 'interrupt';
-          debug?: boolean;
-        };
-
-        if (debug) {
-          const { results: debugResults, diagnostics } = await l2.search({ query, type, tags, limit, domain: searchDomain, debug: true as const });
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({ results: debugResults, count: debugResults.length, diagnostics }),
-              },
-            ],
-          };
-        }
-
-        const results = await l2.search({ query, type, tags, limit, domain: searchDomain });
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({ results, count: results.length }),
-            },
-          ],
-        };
-      }
-
-      case 'memory_read_warm': {
-        const { id, entity_id } = args as { id: string; entity_id?: string };
-
-        if (entity_id) {
-          const storage = getStorageProvider();
-          const meta = await storage.readL2ItemMeta(id);
-          if (meta && meta.visibility === 'group' && meta.group_id) {
-            const membership = await storage.getMembership(meta.group_id, entity_id);
-            if (!membership) {
-              return { content: [{ type: 'text', text: JSON.stringify({ error: 'unauthorized', detail: 'not a member of group' }) }] };
-            }
-          } else if (meta && meta.visibility === 'private' && meta.owner_id && meta.owner_id !== entity_id) {
-            return { content: [{ type: 'text', text: JSON.stringify({ error: 'unauthorized', detail: 'not owner of private item' }) }] };
-          }
-        }
-
-        const item = await l2.readItem(id);
-
-        if (!item) {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({ error: 'not_found', id }),
-              },
-            ],
-          };
-        }
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(item),
-            },
-          ],
-        };
-      }
-
-      case 'memory_write_warm': {
-        const { type, data, entity_id, group_id: writeGroupId, domain: writeDomain } = args as {
-          type: 'entity' | 'session' | 'learning';
-          data: Record<string, unknown>;
-          entity_id?: string;
-          group_id?: string;
-          domain?: 'value' | 'procedural' | 'interrupt';
-        };
-
-        if (entity_id && writeGroupId) {
-          const storage = getStorageProvider();
-          const membership = await storage.getMembership(writeGroupId, entity_id);
-          if (!membership) {
-            return { content: [{ type: 'text', text: JSON.stringify({ error: 'unauthorized', detail: 'not a member of group' }) }] };
-          }
-          if (membership.role === 'viewer') {
-            return { content: [{ type: 'text', text: JSON.stringify({ error: 'unauthorized', detail: 'viewer cannot write' }) }] };
-          }
-          if (membership.posture === 'emcon') {
-            return { content: [{ type: 'text', text: JSON.stringify({ error: 'unauthorized', detail: 'EMCON posture blocks writes' }) }] };
-          }
-        }
-
-        const result = await l2.writeItem(type, data, { group_id: writeGroupId, entity_id, domain: writeDomain });
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result),
-            },
-          ],
-        };
-      }
-
-      case 'memory_delete_warm': {
-        const { id, entity_id } = args as { id: string; entity_id?: string };
-
-        if (entity_id) {
-          const storage = getStorageProvider();
-          const meta = await storage.readL2ItemMeta(id);
-          if (meta && meta.visibility === 'group' && meta.group_id) {
-            const membership = await storage.getMembership(meta.group_id, entity_id);
-            if (!membership) {
-              return { content: [{ type: 'text', text: JSON.stringify({ error: 'unauthorized', detail: 'not a member of group' }) }] };
-            }
-            if (membership.role !== 'owner' && membership.role !== 'admin' && meta.author_id !== entity_id) {
-              return { content: [{ type: 'text', text: JSON.stringify({ error: 'unauthorized', detail: 'only owner/admin or author can delete group items' }) }] };
-            }
-          } else if (meta && meta.visibility === 'private' && meta.owner_id && meta.owner_id !== entity_id) {
-            return { content: [{ type: 'text', text: JSON.stringify({ error: 'unauthorized', detail: 'not owner of private item' }) }] };
-          }
-        }
-
-        const result = await l2.deleteItem(id);
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result),
-            },
-          ],
-        };
-      }
-
-      case 'memory_backup': {
-        const { destination } = args as { destination?: string };
-        const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT || path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory');
-        const destDir = destination || path.join(MEMORY_ROOT, 'backups');
-
-        try {
-          const { createBackup } = await import('./backup.js');
-          const result = await createBackup(destDir);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  success: true,
-                  manifest: result.manifest,
-                  size: result.size,
-                  duration_ms: result.duration_ms,
-                  dbPath: result.dbPath,
-                }),
-              },
-            ],
-          };
-        } catch (e) {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({ error: (e as Error).message }),
-              },
-            ],
-          };
-        }
-      }
-
-      case 'memory_restore': {
-        const { source, dry_run } = args as { source: string; dry_run?: boolean };
-
-        try {
-          const { restoreBackup } = await import('./backup.js');
-          const result = await restoreBackup(source, { dryRun: dry_run });
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  success: true,
-                  items: result.items,
-                  schemaVersion: result.schemaVersion,
-                  integrity: result.integrityReport.ok ? 'passed' : 'failed',
-                  integrityReport: result.integrityReport,
-                }),
-              },
-            ],
-          };
-        } catch (e) {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({ error: (e as Error).message }),
-              },
-            ],
-          };
-        }
-      }
-
-      case 'memory_share': {
-        const { item_id, target_group, entity_id } = args as {
-          item_id: string;
-          target_group: string;
-          entity_id: string;
-        };
-        const result = await l2.shareItem(item_id, target_group, entity_id);
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-      }
-
-      case 'memory_group_create': {
-        const { id, name: groupName, entity_id, culture } = args as {
-          id: string;
-          name: string;
-          entity_id: string;
-          culture?: Record<string, unknown>;
-        };
-        const storage = getStorageProvider();
-        if (culture && Object.keys(culture).length > 0) {
-          const parsed = GroupCultureSchema.safeParse(culture);
-          if (!parsed.success) {
-            return { content: [{ type: 'text', text: JSON.stringify({ error: `invalid culture: ${parsed.error.message}` }) }] };
-          }
-        }
-        const cultureStr = culture ? JSON.stringify(culture) : '{}';
-        try {
-          await storage.createGroup(id, groupName, cultureStr, '{}');
-          await storage.addMember(id, entity_id, 'owner');
-          await storage.logAccess({ entity_id, action: 'create', resource_type: 'group', resource_id: id });
-          return { content: [{ type: 'text', text: JSON.stringify({ success: true, id }) }] };
-        } catch (e) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: (e as Error).message }) }] };
-        }
-      }
-
-      case 'memory_group_list': {
-        const { entity_id } = args as { entity_id?: string };
-        const storage = getStorageProvider();
-        let groups = await storage.listGroups();
-        if (entity_id) {
-          const filtered = [];
-          for (const g of groups) {
-            const m = await storage.getMembership(g.id, entity_id);
-            if (m) filtered.push(g);
-          }
-          groups = filtered;
-        }
-        return { content: [{ type: 'text', text: JSON.stringify({ groups, count: groups.length }) }] };
-      }
-
-      case 'memory_group_read': {
-        const { group_id } = args as { group_id: string };
-        const storage = getStorageProvider();
-        const group = await storage.readGroup(group_id);
-        if (!group) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: 'not_found', group_id }) }] };
-        }
-        const members = await storage.listMembers(group_id);
-        return { content: [{ type: 'text', text: JSON.stringify({ ...group, members }) }] };
-      }
-
-      case 'memory_group_add_member': {
-        const { group_id, entity_id, target_entity_id, role = 'member' } = args as {
-          group_id: string;
-          entity_id: string;
-          target_entity_id: string;
-          role?: string;
-        };
-        const storage = getStorageProvider();
-        const requester = await storage.getMembership(group_id, entity_id);
-        if (!requester || (requester.role !== 'owner' && requester.role !== 'admin')) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: 'unauthorized', detail: 'requires admin or owner role' }) }] };
-        }
-        try {
-          await storage.addMember(group_id, target_entity_id, role);
-          await storage.logAccess({ entity_id, action: 'add_member', resource_type: 'group', resource_id: group_id, detail: `added ${target_entity_id} as ${role}` });
-          return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
-        } catch (e) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: (e as Error).message }) }] };
-        }
-      }
-
-      case 'memory_group_remove_member': {
-        const { group_id, entity_id, target_entity_id } = args as {
-          group_id: string;
-          entity_id: string;
-          target_entity_id: string;
-        };
-        const storage = getStorageProvider();
-        const requester = await storage.getMembership(group_id, entity_id);
-        if (!requester || (requester.role !== 'owner' && requester.role !== 'admin')) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: 'unauthorized', detail: 'requires admin or owner role' }) }] };
-        }
-        const removed = await storage.removeMember(group_id, target_entity_id);
-        if (removed) {
-          await storage.logAccess({ entity_id, action: 'remove_member', resource_type: 'group', resource_id: group_id, detail: `removed ${target_entity_id}` });
-        }
-        return { content: [{ type: 'text', text: JSON.stringify({ success: removed }) }] };
-      }
-
-      case 'memory_bind_context': {
-        const { user_id, directory, group_id } = args as {
-          user_id: string;
-          directory: string;
-          group_id: string;
-        };
-
-        const storage = getStorageProvider();
-        const group = await storage.readGroup(group_id);
-        if (!group) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: 'group_not_found', group_id }) }] };
-        }
-
-        const ctx = await loadHotContext(user_id);
-        if (!ctx) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: 'user_not_found', user_id }) }] };
-        }
-
-        const bindings = { ...(ctx.active.context_bindings || {}), [directory]: group_id };
-        const result = await writeHotContext(user_id, 'patch', {
-          active: { context_bindings: bindings },
-        });
-
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-      }
-
-      case 'memory_unbind_context': {
-        const { user_id, directory } = args as {
-          user_id: string;
-          directory: string;
-        };
-
-        const ctx = await loadHotContext(user_id);
-        if (!ctx) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: 'user_not_found', user_id }) }] };
-        }
-
-        const bindings = { ...(ctx.active.context_bindings || {}) };
-        delete bindings[directory];
-        const result = await writeHotContext(user_id, 'patch', {
-          active: { context_bindings: Object.keys(bindings).length > 0 ? bindings : undefined },
-        });
-
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-      }
-
-      case 'memory_backfill_embeddings': {
-        try {
-          const result = await l2.backfillVec();
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({ success: true, ...result }),
-            }],
-          };
-        } catch (e) {
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({ error: (e as Error).message }),
-            }],
-          };
-        }
-      }
-
-      case 'memory_prefetch_l2': {
-        const { user_id, cwd, limit: prefetchLimit = 10 } = args as {
-          user_id: string;
-          cwd?: string;
-          limit?: number;
-        };
-
-        const ctx = await loadHotContext(user_id);
-        if (!ctx) {
-          return { content: [{ type: 'text', text: JSON.stringify({ error: 'user_not_found', user_id }) }] };
-        }
-
-        const items = await l2.prefetchItems(user_id, {
-          cwd,
-          bindings: ctx.active.context_bindings,
-          limit: prefetchLimit,
-        });
-
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({ prefetched: items.length, items }),
-          }],
-        };
-      }
-
-      default:
-        throw new Error(`Unknown tool: ${name}`);
+    const handler = toolHandlers[name];
+    if (handler) {
+      return handler(args as Record<string, unknown>);
     }
+
+    throw new Error(`Unknown tool: ${name}`);
   });
 }

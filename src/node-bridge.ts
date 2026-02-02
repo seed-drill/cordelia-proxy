@@ -181,6 +181,146 @@ export class NodeBridge {
   }
 
   /**
+   * Decrypt remote item data based on key version.
+   * Returns decrypted buffer or null if item should be skipped.
+   */
+  private async decryptRemoteItem(
+    data: unknown,
+    keyVersion: number,
+    groupId: string,
+    itemId: string,
+  ): Promise<{ data: Buffer; skip: boolean }> {
+    if (isEncryptedPayload(data) && keyVersion === 2) {
+      const groupKey = await getGroupKey(groupId);
+      if (!groupKey) {
+        console.error(`Cordelia: no PSK for group ${groupId}, skipping item ${itemId}`);
+        return { data: Buffer.alloc(0), skip: true };
+      }
+      const decrypted = await groupDecrypt(
+        data as { iv: string; authTag: string; ciphertext: string },
+        groupKey,
+      );
+      return { data: decrypted, skip: false };
+    }
+
+    if (isEncryptedPayload(data) && keyVersion === 1) {
+      return { data: Buffer.alloc(0), skip: true };
+    }
+
+    return { data: Buffer.from(JSON.stringify(data), 'utf-8'), skip: false };
+  }
+
+  /**
+   * Index item in FTS.
+   */
+  private async indexItemInFts(
+    itemId: string,
+    itemData: Buffer,
+    storage: StorageProvider,
+  ): Promise<void> {
+    try {
+      const parsed = JSON.parse(itemData.toString('utf-8'));
+      const name = parsed.name || parsed.focus || parsed.content?.slice(0, 50) || itemId;
+      const tags = (parsed.tags || []).join(' ');
+      const content = [
+        name,
+        parsed.summary || '',
+        parsed.content || '',
+        parsed.context || '',
+        ...(parsed.highlights || []),
+        ...(parsed.aliases || []),
+      ].join(' ');
+      await storage.ftsUpsert(itemId, name, content, tags);
+    } catch {
+      // FTS indexing failed -- item still stored
+    }
+  }
+
+  /**
+   * Process a single remote item for sync.
+   */
+  private async processSyncItem(
+    client: NodeClient,
+    header: { item_id: string; is_deletion?: boolean; updated_at: string },
+    groupId: string,
+    storage: StorageProvider,
+  ): Promise<'synced' | 'skipped' | 'error'> {
+    if (header.is_deletion) return 'skipped';
+
+    const localItem = await storage.readL2Item(header.item_id);
+    if (localItem) return 'skipped';
+
+    const remote = await client.readL2Item(header.item_id);
+    if (!remote) return 'skipped';
+
+    const keyVersion = remote.meta?.key_version ?? 1;
+    const { data: itemData, skip } = await this.decryptRemoteItem(
+      remote.data,
+      keyVersion,
+      groupId,
+      header.item_id,
+    );
+    if (skip) return 'skipped';
+
+    await storage.writeL2Item(header.item_id, remote.type, itemData, {
+      type: remote.type as 'entity' | 'session' | 'learning',
+      owner_id: remote.meta?.owner_id ?? undefined,
+      visibility: (remote.meta?.visibility as 'private' | 'group' | 'public') ?? 'group',
+      group_id: remote.meta?.group_id ?? groupId,
+      author_id: remote.meta?.author_id ?? undefined,
+      key_version: 0,
+    });
+
+    await this.indexItemInFts(header.item_id, itemData, storage);
+    return 'synced';
+  }
+
+  /**
+   * Sync items for a single group.
+   */
+  private async syncSingleGroup(
+    client: NodeClient,
+    groupId: string,
+    storage: StorageProvider,
+    sqliteStorage: SqliteStorageProvider | null,
+  ): Promise<{ synced: number; skipped: number; errors: number }> {
+    let synced = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    const since = sqliteStorage?.getSyncTimestamp(groupId) ?? undefined;
+    const headers = await client.listGroupItems(groupId, since, 200);
+
+    for (const header of headers) {
+      try {
+        const result = await this.processSyncItem(client, header, groupId, storage);
+        if (result === 'synced') synced++;
+        else if (result === 'skipped') skipped++;
+        else errors++;
+      } catch (e) {
+        if (e instanceof NodeClientError && e.status === 404) {
+          skipped++;
+        } else {
+          console.error(`Cordelia: failed to sync item ${header.item_id}: ${(e as Error).message}`);
+          errors++;
+        }
+      }
+    }
+
+    if (sqliteStorage && headers.length > 0) {
+      const maxUpdatedAt = headers.reduce(
+        (max, h) => (h.updated_at > max ? h.updated_at : max),
+        '',
+      );
+      if (maxUpdatedAt) {
+        sqliteStorage.setSyncTimestamp(groupId, maxUpdatedAt);
+      }
+    }
+
+    return { synced, skipped, errors };
+  }
+
+  /**
    * Pull new group items from the P2P network and index locally.
    * For each group, queries the node for items updated since last sync.
    * Decrypts group PSK items (key_version=2), skips proxy-key items (key_version=1).
@@ -194,118 +334,22 @@ export class NodeBridge {
 
     const sqliteStorage = storage.name === 'sqlite' ? (storage as SqliteStorageProvider) : null;
 
-    let synced = 0;
-    let skipped = 0;
-    let errors = 0;
+    let totalSynced = 0;
+    let totalSkipped = 0;
+    let totalErrors = 0;
 
     for (const groupId of groupIds) {
       try {
-        // Get sync timestamp (SQLite-only)
-        const since = sqliteStorage?.getSyncTimestamp(groupId) ?? undefined;
-
-        const headers = await client.listGroupItems(groupId, since, 200);
-
-        for (const header of headers) {
-          // Skip deletions
-          if (header.is_deletion) continue;
-
-          // Check if already local
-          const localItem = await storage.readL2Item(header.item_id);
-          if (localItem) {
-            skipped++;
-            continue;
-          }
-
-          try {
-            const remote = await client.readL2Item(header.item_id);
-            if (!remote) {
-              skipped++;
-              continue;
-            }
-
-            const data = remote.data;
-            const keyVersion = remote.meta?.key_version ?? 1;
-
-            let itemData: Buffer;
-
-            if (isEncryptedPayload(data) && keyVersion === 2) {
-              // Group PSK encrypted -- decrypt
-              const groupKey = await getGroupKey(groupId);
-              if (!groupKey) {
-                console.error(`Cordelia: no PSK for group ${groupId}, skipping item ${header.item_id}`);
-                skipped++;
-                continue;
-              }
-              const decrypted = await groupDecrypt(
-                data as { iv: string; authTag: string; ciphertext: string },
-                groupKey,
-              );
-              // Store decrypted in local SQLite (proxy personal encryption handled by storage layer)
-              itemData = decrypted;
-            } else if (isEncryptedPayload(data) && keyVersion === 1) {
-              // Encrypted with someone else's proxy key -- can't decrypt
-              skipped++;
-              continue;
-            } else {
-              // Not encrypted (backwards compat)
-              itemData = Buffer.from(JSON.stringify(data), 'utf-8');
-            }
-
-            // Write to local storage
-            await storage.writeL2Item(header.item_id, remote.type, itemData, {
-              type: remote.type as 'entity' | 'session' | 'learning',
-              owner_id: remote.meta?.owner_id ?? undefined,
-              visibility: (remote.meta?.visibility as 'private' | 'group' | 'public') ?? 'group',
-              group_id: remote.meta?.group_id ?? groupId,
-              author_id: remote.meta?.author_id ?? undefined,
-              key_version: 0, // Stored locally as plaintext (re-encrypted by local crypto if enabled)
-            });
-
-            // Index in FTS
-            try {
-              const parsed = JSON.parse(itemData.toString('utf-8'));
-              const name = parsed.name || parsed.focus || parsed.content?.slice(0, 50) || header.item_id;
-              const tags = (parsed.tags || []).join(' ');
-              const content = [
-                name,
-                parsed.summary || '',
-                parsed.content || '',
-                parsed.context || '',
-                ...(parsed.highlights || []),
-                ...(parsed.aliases || []),
-              ].join(' ');
-              await storage.ftsUpsert(header.item_id, name, content, tags);
-            } catch {
-              // FTS indexing failed -- item still stored
-            }
-
-            synced++;
-          } catch (e) {
-            if (e instanceof NodeClientError && e.status === 404) {
-              skipped++;
-            } else {
-              console.error(`Cordelia: failed to sync item ${header.item_id}: ${(e as Error).message}`);
-              errors++;
-            }
-          }
-        }
-
-        // Update sync timestamp
-        if (sqliteStorage && headers.length > 0) {
-          const maxUpdatedAt = headers.reduce(
-            (max, h) => (h.updated_at > max ? h.updated_at : max),
-            '',
-          );
-          if (maxUpdatedAt) {
-            sqliteStorage.setSyncTimestamp(groupId, maxUpdatedAt);
-          }
-        }
+        const result = await this.syncSingleGroup(client, groupId, storage, sqliteStorage);
+        totalSynced += result.synced;
+        totalSkipped += result.skipped;
+        totalErrors += result.errors;
       } catch (e) {
         console.error(`Cordelia: failed to sync group ${groupId}: ${(e as Error).message}`);
-        errors++;
+        totalErrors++;
       }
     }
 
-    return { synced, skipped, errors };
+    return { synced: totalSynced, skipped: totalSkipped, errors: totalErrors };
   }
 }

@@ -309,19 +309,21 @@ function extractKeywords(text: string): string[] {
   return [...new Set(words)];
 }
 
-/**
- * Search implementation: FTS5 BM25 + optional sqlite-vec cosine similarity.
- * 70/30 dominant-signal hybrid weighting when both are available.
- * For JSON/non-SQLite providers, FTS/vec return empty — degrades to blob index listing.
- */
-async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { results: SearchResult[]; diagnostics: SearchDiagnostics }> {
-  const { query, type, tags, limit = 20, semantic = true, debug = false, domain: domainFilter } = options;
-  const storage = getStorageProvider();
-  const index = await loadIndex();
+// --- Search Helper Functions ---
 
-  // Build lookup map from blob index for metadata.
-  // Enrich with domain from DB since domain is edge-only metadata (not in encrypted blob).
+interface SearchContext {
+  storage: ReturnType<typeof getStorageProvider>;
+  entryMap: Map<string, L2IndexEntry>;
+  indexEntryCount: number;
+}
+
+/**
+ * Build lookup map from blob index, enriching with domain from DB.
+ */
+async function buildEntryMap(index: L2Index): Promise<SearchContext> {
+  const storage = getStorageProvider();
   const entryMap = new Map<string, L2IndexEntry>();
+
   for (const entry of index.entries) {
     if (!entry.domain && storage.name === 'sqlite') {
       const meta = await storage.readL2ItemMeta(entry.id);
@@ -332,72 +334,226 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
     entryMap.set(entry.id, entry);
   }
 
-  // No query: return all matching type/tags/domain.
-  // When domain filter is set on SQLite, query DB directly since blob index
-  // may not contain all items (e.g. sessions written before domain migration).
-  if (!query) {
-    let results: SearchResult[] = [];
+  return { storage, entryMap, indexEntryCount: index.entries.length };
+}
 
-    if (domainFilter && storage.name === 'sqlite') {
-      // DB-backed domain query -- authoritative source for domain classification.
-      // Use getDomainItems (no visibility filter) since search doesn't scope by owner.
-      const sqliteStorage = storage as SqliteStorageProvider;
-      const dbItems = await sqliteStorage.getDomainItems(domainFilter, limit);
-      for (const item of dbItems) {
-        if (type && item.type !== type) continue;
-        const entry = entryMap.get(item.id);
-        const name = entry?.name || item.id;
-        const itemTags = entry?.tags || [];
-        if (tags && tags.length > 0) {
-          const hasMatchingTag = tags.some((t) => itemTags.includes(t.toLowerCase()));
-          if (!hasMatchingTag) continue;
-        }
-        results.push({
-          id: item.id,
-          type: item.type as 'entity' | 'session' | 'learning',
-          subtype: entry?.subtype,
-          name,
-          tags: itemTags,
-          path: entry?.path || `${item.type}s/${item.id}.json`,
-          score: 1,
-          domain: item.domain as MemoryDomain | undefined,
-        });
+/**
+ * Filter entries matching type, tags, and domain without a search query.
+ */
+function filterEntryByOptions(
+  entry: { type: L2ItemType; tags: string[]; domain?: MemoryDomain },
+  type: L2ItemType | undefined,
+  tags: string[] | undefined,
+  domainFilter: MemoryDomain | undefined,
+): boolean {
+  if (type && entry.type !== type) return false;
+  if (domainFilter && entry.domain !== domainFilter) return false;
+  if (tags && tags.length > 0) {
+    const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
+    if (!hasMatchingTag) return false;
+  }
+  return true;
+}
+
+/**
+ * Search without query - return all matching type/tags/domain.
+ */
+async function searchWithoutQuery(
+  ctx: SearchContext,
+  options: SearchOptions,
+  index: L2Index,
+): Promise<SearchResult[]> {
+  const { type, tags, limit = 20, domain: domainFilter } = options;
+  const results: SearchResult[] = [];
+
+  if (domainFilter && ctx.storage.name === 'sqlite') {
+    const sqliteStorage = ctx.storage as SqliteStorageProvider;
+    const dbItems = await sqliteStorage.getDomainItems(domainFilter, limit);
+    for (const item of dbItems) {
+      const entry = ctx.entryMap.get(item.id);
+      const itemTags = entry?.tags || [];
+      if (!filterEntryByOptions({ type: item.type as L2ItemType, tags: itemTags, domain: item.domain as MemoryDomain }, type, tags, domainFilter)) {
+        continue;
       }
-    } else {
-      for (const entry of index.entries) {
-        if (type && entry.type !== type) continue;
-        if (domainFilter && entry.domain !== domainFilter) continue;
-        if (tags && tags.length > 0) {
-          const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
-          if (!hasMatchingTag) continue;
-        }
-        results.push({
-          id: entry.id,
-          type: entry.type,
-          subtype: entry.subtype,
-          name: entry.name,
-          tags: entry.tags,
-          path: entry.path,
-          score: 1,
-          domain: entry.domain,
-        });
+      results.push({
+        id: item.id,
+        type: item.type as L2ItemType,
+        subtype: entry?.subtype,
+        name: entry?.name || item.id,
+        tags: itemTags,
+        path: entry?.path || `${item.type}s/${item.id}.json`,
+        score: 1,
+        domain: item.domain as MemoryDomain | undefined,
+      });
+    }
+  } else {
+    for (const entry of index.entries) {
+      if (!filterEntryByOptions(entry, type, tags, domainFilter)) continue;
+      results.push({
+        id: entry.id,
+        type: entry.type,
+        subtype: entry.subtype,
+        name: entry.name,
+        tags: entry.tags,
+        path: entry.path,
+        score: 1,
+        domain: entry.domain,
+      });
+    }
+  }
+
+  return results.slice(0, limit);
+}
+
+/**
+ * Perform FTS5 BM25 keyword search, returning normalized scores.
+ */
+async function performFtsSearch(
+  storage: ReturnType<typeof getStorageProvider>,
+  query: string,
+  limit: number,
+): Promise<Map<string, number>> {
+  const ftsResults = await storage.ftsSearch(query, limit * 3);
+  const ftsScores = new Map<string, number>();
+  const maxAbsRank = ftsResults.length > 0
+    ? Math.max(...ftsResults.map((r) => Math.abs(r.rank)), 1)
+    : 1;
+  for (const r of ftsResults) {
+    ftsScores.set(r.item_id, Math.abs(r.rank) / maxAbsRank);
+  }
+  return ftsScores;
+}
+
+/**
+ * Perform semantic vector search, returning similarity scores.
+ */
+async function performVecSearch(
+  storage: ReturnType<typeof getStorageProvider>,
+  query: string,
+  limit: number,
+  semantic: boolean,
+): Promise<{ vecScores: Map<string, number>; queryEmbeddingGenerated: boolean; useVec: boolean }> {
+  const provider = getDefaultProvider();
+  const vecAvailable = storage.vecAvailable();
+  const useVec = semantic && vecAvailable && provider.dimensions() > 0;
+
+  const vecScores = new Map<string, number>();
+  let queryEmbeddingGenerated = false;
+
+  if (useVec) {
+    const queryEmbedding = await getCachedEmbedding(query, provider);
+    queryEmbeddingGenerated = queryEmbedding !== null;
+    if (queryEmbedding) {
+      const vecResults = await storage.vecSearch(toFloat32Array(queryEmbedding), limit * 3);
+      for (const r of vecResults) {
+        vecScores.set(r.item_id, Math.max(0, 1 - r.distance));
       }
     }
+  }
 
-    results = results.slice(0, limit);
-    for (const r of results) await storage.recordAccess(r.id);
+  return { vecScores, queryEmbeddingGenerated, useVec };
+}
+
+/**
+ * Compute hybrid score from FTS and vector scores.
+ */
+function computeHybridScore(
+  ftsScore: number,
+  vecScore: number,
+  hasSemanticScores: boolean,
+  domain?: MemoryDomain,
+): number {
+  let score = hasSemanticScores
+    ? 0.7 * Math.max(vecScore, ftsScore) + 0.3 * Math.min(vecScore, ftsScore)
+    : ftsScore;
+
+  if (domain === 'value') score += 0.05;
+  else if (domain === 'procedural') score += 0.02;
+
+  return score;
+}
+
+/**
+ * Resolve entry from storage if not in blob index.
+ */
+async function resolveEntry(
+  id: string,
+  storage: ReturnType<typeof getStorageProvider>,
+): Promise<L2IndexEntry | null> {
+  const stored = await storage.readL2Item(id);
+  if (!stored) return null;
+  const item = await readItem(id);
+  if (!item) return null;
+  const resolvedType = stored.type as L2ItemType;
+  const resolvedName = (item as { name?: string }).name || (item as { focus?: string }).focus || id;
+  const resolvedTags = ((item as { tags?: string[] }).tags || []).map((t) => t.toLowerCase());
+  return {
+    id,
+    type: resolvedType,
+    name: resolvedName,
+    tags: resolvedTags,
+    keywords: [],
+    path: `${resolvedType}s/${id}.json`,
+    visibility: 'private' as const,
+  };
+}
+
+/**
+ * Build diagnostics object for debug mode.
+ */
+function buildDiagnostics(
+  finalResults: SearchResult[],
+  debugScores: Array<{ id: string; fts_score: number; vec_score: number; combined_score: number }>,
+  vecAvailable: boolean,
+  useVec: boolean,
+  queryEmbeddingGenerated: boolean,
+  ftsCount: number,
+  vecCount: number,
+  indexEntryCount: number,
+): SearchDiagnostics {
+  const resultIds = new Set(finalResults.map((r) => r.id));
+  const filteredDebugScores = debugScores
+    .filter((d) => resultIds.has(d.id))
+    .sort((a, b) => b.combined_score - a.combined_score);
+
+  return {
+    search_path: 'sql',
+    vec_available: vecAvailable,
+    vec_used: useVec && queryEmbeddingGenerated,
+    query_embedding_generated: queryEmbeddingGenerated,
+    fts_candidates: ftsCount,
+    vec_candidates: vecCount,
+    blob_index_entries: indexEntryCount,
+    results: filteredDebugScores,
+  };
+}
+
+/**
+ * Search implementation: FTS5 BM25 + optional sqlite-vec cosine similarity.
+ * 70/30 dominant-signal hybrid weighting when both are available.
+ * For JSON/non-SQLite providers, FTS/vec return empty — degrades to blob index listing.
+ */
+async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { results: SearchResult[]; diagnostics: SearchDiagnostics }> {
+  const { query, type, tags, limit = 20, semantic = true, debug = false, domain: domainFilter } = options;
+  const index = await loadIndex();
+  const ctx = await buildEntryMap(index);
+
+  // No query: return all matching type/tags/domain
+  if (!query) {
+    const results = await searchWithoutQuery(ctx, options, index);
+    for (const r of results) await ctx.storage.recordAccess(r.id);
 
     if (debug) {
       return {
         results,
         diagnostics: {
           search_path: 'sql',
-          vec_available: storage.vecAvailable(),
+          vec_available: ctx.storage.vecAvailable(),
           vec_used: false,
           query_embedding_generated: false,
           fts_candidates: 0,
           vec_candidates: 0,
-          blob_index_entries: index.entries.length,
+          blob_index_entries: ctx.indexEntryCount,
           results: results.map((r) => ({ id: r.id, fts_score: 0, vec_score: 0, combined_score: 1 })),
         },
       };
@@ -405,92 +561,29 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
     return results;
   }
 
-  // FTS5 BM25 keyword search
-  const ftsResults = await storage.ftsSearch(query, limit * 3); // over-fetch for merging
-  const ftsScores = new Map<string, number>();
-  // FTS5 rank is negative (lower = better). Normalize to 0-1.
-  const maxAbsRank = ftsResults.length > 0
-    ? Math.max(...ftsResults.map((r) => Math.abs(r.rank)), 1)
-    : 1;
-  for (const r of ftsResults) {
-    ftsScores.set(r.item_id, Math.abs(r.rank) / maxAbsRank);
-  }
-
-  // Semantic search via sqlite-vec
-  const provider = getDefaultProvider();
-  const vecAvailable = storage.vecAvailable();
-  const useVec = semantic && vecAvailable && provider.dimensions() > 0;
-
-  const vecScores = new Map<string, number>();
-  let queryEmbedding: number[] | null = null;
-  let queryEmbeddingGenerated = false;
-
-  if (useVec) {
-    queryEmbedding = await getCachedEmbedding(query, provider);
-    queryEmbeddingGenerated = queryEmbedding !== null;
-    if (queryEmbedding) {
-      const vecResults = await storage.vecSearch(toFloat32Array(queryEmbedding), limit * 3);
-      for (const r of vecResults) {
-        // sqlite-vec returns distance (lower = more similar). Convert to similarity.
-        vecScores.set(r.item_id, Math.max(0, 1 - r.distance));
-      }
-    }
-  }
-
+  // Perform FTS and vector searches
+  const ftsScores = await performFtsSearch(ctx.storage, query, limit);
+  const { vecScores, queryEmbeddingGenerated, useVec } = await performVecSearch(ctx.storage, query, limit, semantic);
   const hasSemanticScores = vecScores.size > 0;
 
-  // Merge candidates from both FTS and vec
+  // Merge candidates and compute scores
   const candidateIds = new Set<string>([...ftsScores.keys(), ...vecScores.keys()]);
-
   const results: SearchResult[] = [];
   const debugScores: Array<{ id: string; fts_score: number; vec_score: number; combined_score: number }> = [];
 
   for (const id of candidateIds) {
-    let entry = entryMap.get(id);
-
-    // If not in blob index, resolve from l2_items directly
+    let entry: L2IndexEntry | undefined = ctx.entryMap.get(id);
     if (!entry) {
-      const stored = await storage.readL2Item(id);
-      if (!stored) continue;
-      const item = await readItem(id);
-      if (!item) continue;
-      const resolvedType = stored.type as L2ItemType;
-      const resolvedName = (item as { name?: string }).name || (item as { focus?: string }).focus || id;
-      const resolvedTags = ((item as { tags?: string[] }).tags || []).map((t) => t.toLowerCase());
-      entry = {
-        id,
-        type: resolvedType,
-        name: resolvedName,
-        tags: resolvedTags,
-        keywords: [],
-        path: `${resolvedType}s/${id}.json`,
-        visibility: 'private' as const,
-      };
+      const resolved = await resolveEntry(id, ctx.storage);
+      if (!resolved) continue;
+      entry = resolved;
     }
 
-    // Type filter
-    if (type && entry.type !== type) continue;
-
-    // Domain filter
-    if (domainFilter && entry.domain !== domainFilter) continue;
-
-    // Tag filter
-    if (tags && tags.length > 0) {
-      const hasMatchingTag = tags.some((t) => entry.tags.includes(t.toLowerCase()));
-      if (!hasMatchingTag) continue;
-    }
+    if (!filterEntryByOptions(entry, type, tags, domainFilter)) continue;
 
     const kw = ftsScores.get(id) || 0;
     const sem = vecScores.get(id) || 0;
-
-    // Dominant-signal hybrid: stronger signal leads, weaker boosts
-    let score = hasSemanticScores
-      ? 0.7 * Math.max(sem, kw) + 0.3 * Math.min(sem, kw)
-      : kw;
-
-    // Subtle domain boost: value items surface slightly higher
-    if (entry.domain === 'value') score += 0.05;
-    else if (entry.domain === 'procedural') score += 0.02;
+    const score = computeHybridScore(kw, sem, hasSemanticScores, entry.domain);
 
     if (score === 0) continue;
 
@@ -513,27 +606,21 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
   results.sort((a, b) => b.score - a.score);
   const finalResults = results.slice(0, limit);
 
-  for (const r of finalResults) await storage.recordAccess(r.id);
+  for (const r of finalResults) await ctx.storage.recordAccess(r.id);
 
   if (debug) {
-    // Sort debug scores to match result order
-    const resultIds = new Set(finalResults.map((r) => r.id));
-    const filteredDebugScores = debugScores
-      .filter((d) => resultIds.has(d.id))
-      .sort((a, b) => b.combined_score - a.combined_score);
-
     return {
       results: finalResults,
-      diagnostics: {
-        search_path: 'sql',
-        vec_available: vecAvailable,
-        vec_used: useVec && queryEmbeddingGenerated,
-        query_embedding_generated: queryEmbeddingGenerated,
-        fts_candidates: ftsScores.size,
-        vec_candidates: vecScores.size,
-        blob_index_entries: index.entries.length,
-        results: filteredDebugScores,
-      },
+      diagnostics: buildDiagnostics(
+        finalResults,
+        debugScores,
+        ctx.storage.vecAvailable(),
+        useVec,
+        queryEmbeddingGenerated,
+        ftsScores.size,
+        vecScores.size,
+        ctx.indexEntryCount,
+      ),
     };
   }
 
@@ -566,6 +653,71 @@ function _getItemPath(type: L2ItemType, id: string): string {
 }
 
 /**
+ * Decrypt an encrypted payload using group or personal key.
+ */
+async function decryptPayload(
+  parsed: unknown,
+  storage: ReturnType<typeof getStorageProvider>,
+  id: string,
+): Promise<unknown> {
+  const itemMeta = await storage.readL2ItemMeta(id);
+  if (itemMeta && itemMeta.key_version === 2 && itemMeta.group_id) {
+    const { getGroupKey, groupDecrypt } = await import('./group-keys.js');
+    const groupKey = await getGroupKey(itemMeta.group_id);
+    if (groupKey) {
+      const decrypted = await groupDecrypt(parsed as EncryptedPayload, groupKey);
+      return JSON.parse(decrypted.toString('utf-8'));
+    }
+    throw new Error(`Cannot read group item: no PSK for group ${itemMeta.group_id}`);
+  }
+
+  const cryptoProvider = getDefaultCryptoProvider();
+  if (!cryptoProvider.isUnlocked()) {
+    throw new Error('Cannot read encrypted item: encryption not configured');
+  }
+  const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
+  return JSON.parse(decrypted.toString('utf-8'));
+}
+
+/**
+ * Refresh TTL on item access based on domain or group policy.
+ */
+async function refreshTtlOnAccess(
+  storage: ReturnType<typeof getStorageProvider>,
+  id: string,
+): Promise<void> {
+  if (storage.name !== 'sqlite') return;
+
+  const accessMeta = await storage.readL2ItemMeta(id);
+  if (!accessMeta?.ttl_expires_at) return;
+
+  if (accessMeta.visibility === 'group' && accessMeta.group_id) {
+    const culture = await getGroupCulture(accessMeta.group_id);
+    if (culture?.ttl_default && culture.ttl_default > 0) {
+      await storage.updateTtl(id, new Date(Date.now() + culture.ttl_default * 1000).toISOString());
+    }
+  } else if (accessMeta.domain === 'interrupt') {
+    await storage.updateTtl(id, computeInterruptTtl());
+  }
+}
+
+/**
+ * Validate and parse item based on type.
+ */
+function validateItem(itemType: string, parsed: unknown): L2Item | null {
+  switch (itemType) {
+    case 'entity':
+      return L2EntitySchema.parse(parsed);
+    case 'session':
+      return L2SessionSchema.parse(parsed);
+    case 'learning':
+      return L2LearningSchema.parse(parsed);
+    default:
+      return null;
+  }
+}
+
+/**
  * Read a specific L2 item by ID.
  * Handles decryption if the item is encrypted.
  */
@@ -574,10 +726,7 @@ export async function readItem(id: string): Promise<L2Item | null> {
 
   try {
     const stored = await storage.readL2Item(id);
-
-    if (!stored) {
-      return null;
-    }
+    if (!stored) return null;
 
     // Determine type: SQLite storage returns type directly, JSON needs index lookup
     let itemType: string = stored.type;
@@ -592,58 +741,14 @@ export async function readItem(id: string): Promise<L2Item | null> {
 
     // Handle encrypted items
     if (isEncryptedPayload(parsed)) {
-      // Check if this is a group PSK-encrypted item (key_version=2)
-      const itemMeta = await storage.readL2ItemMeta(id);
-      if (itemMeta && itemMeta.key_version === 2 && itemMeta.group_id) {
-        const { getGroupKey, groupDecrypt } = await import('./group-keys.js');
-        const groupKey = await getGroupKey(itemMeta.group_id);
-        if (groupKey) {
-          const decrypted = await groupDecrypt(parsed as EncryptedPayload, groupKey);
-          parsed = JSON.parse(decrypted.toString('utf-8'));
-        } else {
-          throw new Error(`Cannot read group item: no PSK for group ${itemMeta.group_id}`);
-        }
-      } else {
-        const cryptoProvider = getDefaultCryptoProvider();
-        if (!cryptoProvider.isUnlocked()) {
-          throw new Error('Cannot read encrypted item: encryption not configured');
-        }
-        const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
-        parsed = JSON.parse(decrypted.toString('utf-8'));
-      }
+      parsed = await decryptPayload(parsed, storage, id);
     }
 
-    // Record access (no-op for JSON provider, increments for SQLite)
+    // Record access and refresh TTL
     await storage.recordAccess(id);
+    await refreshTtlOnAccess(storage, id);
 
-    // Refresh TTL on access: domain policy for private items, culture policy for group items
-    if (storage.name === 'sqlite') {
-      const accessMeta = await storage.readL2ItemMeta(id);
-      if (accessMeta?.ttl_expires_at) {
-        if (accessMeta.visibility === 'group' && accessMeta.group_id) {
-          // Group item: refresh from culture policy
-          const culture = await getGroupCulture(accessMeta.group_id);
-          if (culture?.ttl_default && culture.ttl_default > 0) {
-            await storage.updateTtl(id, new Date(Date.now() + culture.ttl_default * 1000).toISOString());
-          }
-        } else if (accessMeta.domain === 'interrupt') {
-          // Private interrupt item: refresh from domain policy
-          await storage.updateTtl(id, computeInterruptTtl());
-        }
-      }
-    }
-
-    // Validate based on type
-    switch (itemType) {
-      case 'entity':
-        return L2EntitySchema.parse(parsed);
-      case 'session':
-        return L2SessionSchema.parse(parsed);
-      case 'learning':
-        return L2LearningSchema.parse(parsed);
-      default:
-        return null;
-    }
+    return validateItem(itemType, parsed);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return null;
