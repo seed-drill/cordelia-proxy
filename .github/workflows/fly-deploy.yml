@@ -12,6 +12,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
+
+      - name: Ensure volumes exist
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          existing=$(flyctl volumes list --json | jq '[.[] | select(.name == "cordelia_data")] | length')
+          if [ "$existing" -lt 2 ]; then
+            needed=$((2 - existing))
+            echo "Creating $needed volume(s)..."
+            flyctl volume create cordelia_data -r ams -n "$needed" -y
+          else
+            echo "Volumes already exist ($existing found)"
+          fi
+
+      - name: Deploy
+        run: flyctl deploy --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
