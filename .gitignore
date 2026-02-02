@@ -4,11 +4,11 @@ dist/
 .DS_Store
 
 # Memory data (local only, never committed)
-memory/audit.jsonl
-memory/*.db
-memory/*.db-wal
-memory/*.db-shm
+memory/
 backup-*.json
+
+# Claude Code personal settings
+.claude/
 
 # Security -- never commit secrets
 .env
