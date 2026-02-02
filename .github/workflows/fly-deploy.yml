@@ -1,9 +1,4 @@
 # See https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
-#
-# Disabled 2026-01-31: No FLY_API_TOKEN configured.
-# Martin: to re-enable, set FLY_API_TOKEN in repo secrets and remove the
-# `if: false` below. Your Fly app needs to match the fly.toml in this repo.
-
 name: Fly Deploy
 on:
   push:
@@ -12,7 +7,6 @@ on:
 jobs:
   deploy:
     name: Deploy app
-    if: false  # Disabled until FLY_API_TOKEN is configured
     runs-on: ubuntu-latest
     concurrency: deploy-group
     steps:
