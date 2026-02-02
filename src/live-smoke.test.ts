@@ -38,13 +38,15 @@ function assert(condition: boolean, message: string): void {
 async function run() {
   const memRoot = process.env.CORDELIA_MEMORY_ROOT;
   if (!memRoot) {
-    console.error('CORDELIA_MEMORY_ROOT not set');
-    process.exit(1);
+    console.log('CORDELIA_MEMORY_ROOT not set');
+    console.log('Skipping live-smoke tests (run manually with env vars set)');
+    return;
   }
 
   if (!process.env.CORDELIA_STORAGE) {
-    console.error('CORDELIA_STORAGE not set (expected "sqlite")');
-    process.exit(1);
+    console.log('CORDELIA_STORAGE not set (expected "sqlite")');
+    console.log('Skipping live-smoke tests (run manually with env vars set)');
+    return;
   }
 
   await initStorageProvider(memRoot);
@@ -124,7 +126,7 @@ async function run() {
   // --- Debug mode ---
 
   await test('debug mode returns diagnostics', async () => {
-    const { results, diagnostics } = await l2.search({ query: 'memory', debug: true as const });
+    const { results: _results, diagnostics } = await l2.search({ query: 'memory', debug: true as const });
     assert(diagnostics.search_path === 'sql', 'expected sql search path');
     assert(typeof diagnostics.vec_available === 'boolean', 'vec_available should be boolean');
     assert(typeof diagnostics.fts_candidates === 'number', 'fts_candidates should be number');

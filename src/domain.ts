@@ -149,7 +149,7 @@ export function checkL1Budget(
   const violations: L1BudgetViolation[] = [];
   const actual: Record<string, number> = {};
 
-  let totalSize = 0;
+  let _totalSize = 0;
 
   for (const [section, budget] of Object.entries(budgets.sections)) {
     const sectionData = l1[section];
@@ -159,7 +159,7 @@ export function checkL1Budget(
     }
     const size = Buffer.byteLength(JSON.stringify(sectionData), 'utf-8');
     actual[section] = size;
-    totalSize += size;
+    _totalSize += size;
     if (size > budget) {
       violations.push({ section, actual: size, budget });
     }

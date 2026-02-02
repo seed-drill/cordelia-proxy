@@ -84,47 +84,48 @@ jobs:
       - name: Verify dist output
         run: test -d dist && test -f dist/server.js
 
-  integration:
-    name: Integration (self-hosted)
-    needs: lint
-    runs-on: [self-hosted, cordelia-ci]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-
-      # Full test suite (continue so e2e always runs)
-      - name: Unit + integration tests
-        id: tests
-        continue-on-error: true
-        run: npm test
-
-      # End-to-end install.sh test in clean container
-      - name: Install.sh e2e test
-        run: |
-          docker build -t cordelia-install-test -f Dockerfile.test .
-          docker run --rm cordelia-install-test
-
-      # MCP protocol round-trip test
-      - name: MCP e2e test
-        run: |
-          docker build -t cordelia-mcp-e2e -f Dockerfile.e2e .
-          docker run --rm cordelia-mcp-e2e
-
-      # Clean up docker images
-      - name: Docker cleanup
-        if: always()
-        run: |
-          docker image rm cordelia-install-test 2>/dev/null || true
-          docker image rm cordelia-mcp-e2e 2>/dev/null || true
-
-      # Fail the job if tests failed
-      - name: Check test results
-        if: steps.tests.outcome == 'failure'
-        run: |
-          echo "Unit/integration tests failed - see above for details"
-          exit 1
+  # Disabled: no self-hosted runner configured
+  # integration:
+  #   name: Integration (self-hosted)
+  #   needs: lint
+  #   runs-on: [self-hosted, cordelia-ci]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: 22
+  #         cache: npm
+  #     - run: npm ci
+  #     - run: npm run build
+  #
+  #     # Full test suite (continue so e2e always runs)
+  #     - name: Unit + integration tests
+  #       id: tests
+  #       continue-on-error: true
+  #       run: npm test
+  #
+  #     # End-to-end install.sh test in clean container
+  #     - name: Install.sh e2e test
+  #       run: |
+  #         docker build -t cordelia-install-test -f Dockerfile.test .
+  #         docker run --rm cordelia-install-test
+  #
+  #     # MCP protocol round-trip test
+  #     - name: MCP e2e test
+  #       run: |
+  #         docker build -t cordelia-mcp-e2e -f Dockerfile.e2e .
+  #         docker run --rm cordelia-mcp-e2e
+  #
+  #     # Clean up docker images
+  #     - name: Docker cleanup
+  #       if: always()
+  #       run: |
+  #         docker image rm cordelia-install-test 2>/dev/null || true
+  #         docker image rm cordelia-mcp-e2e 2>/dev/null || true
+  #
+  #     # Fail the job if tests failed
+  #     - name: Check test results
+  #       if: steps.tests.outcome == 'failure'
+  #       run: |
+  #         echo "Unit/integration tests failed - see above for details"
+  #         exit 1

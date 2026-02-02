@@ -156,7 +156,7 @@ describe('restoreBackup', () => {
     const result = await restoreBackup(path.dirname(backup.dbPath));
 
     assert.strictEqual(result.items, 2, 'should restore 2 items (not 3)');
-    assert.strictEqual(result.schemaVersion, 5);
+    assert.strictEqual(result.schemaVersion, 6);
 
     // Verify data is restored
     const l1 = await srcProvider.readL1('bob');
@@ -326,7 +326,7 @@ describe('Schema migration on restore', () => {
     setStorageProvider(liveProvider);
 
     const result = await restoreBackup(backupDir);
-    assert.strictEqual(result.schemaVersion, 5, 'Should migrate to v5');
+    assert.strictEqual(result.schemaVersion, 6, 'Should migrate to v6');
     assert.strictEqual(result.items, 1);
 
     // Verify checksum column exists (v3 feature)

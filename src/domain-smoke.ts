@@ -9,7 +9,7 @@
 import * as path from 'path';
 import { initStorageProvider } from './storage.js';
 import { getConfig as getCryptoConfig, loadOrCreateSalt, initCrypto } from './crypto.js';
-import { search, prefetchItems, readItem, backfillDomains } from './l2.js';
+import { search, prefetchItems, readItem } from './l2.js';
 import type { SqliteStorageProvider } from './storage-sqlite.js';
 
 const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT
