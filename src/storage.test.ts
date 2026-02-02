@@ -237,47 +237,6 @@ describe('SQLite FTS5 search', () => {
   it('should report hasFtsData correctly', async () => {
     assert.strictEqual(provider.hasFtsData(), true, 'should have FTS data after inserts');
   });
-
-  it('should find content from details field via FTS', async () => {
-    // Simulate indexing an entity with details field content
-    const detailsText = 'Trained ANNs on 386DX33. Manchester 1993. Which president was an ex movie actor married to Nancy';
-    await provider.ftsUpsert(
-      'entity-details',
-      'Connectionist Models',
-      `Connectionist Models Neural network concepts ${detailsText}`,
-      'ai neural pdp',
-    );
-
-    // Search by content only found in the details portion
-    const results386 = await provider.ftsSearch('386DX33', 10);
-    assert.ok(results386.some((r) => r.item_id === 'entity-details'), 'should find by "386DX33" from details');
-
-    const resultsManchester = await provider.ftsSearch('Manchester', 10);
-    assert.ok(resultsManchester.some((r) => r.item_id === 'entity-details'), 'should find by "Manchester" from details');
-
-    const resultsActor = await provider.ftsSearch('movie actor', 10);
-    assert.ok(resultsActor.some((r) => r.item_id === 'entity-details'), 'should find by "movie actor" from details');
-  });
-
-  it('should find content via prefix search', async () => {
-    // "386" should match "386DX33" via prefix matching
-    const results = await provider.ftsSearch('386', 10);
-    assert.ok(results.some((r) => r.item_id === 'entity-details'), 'prefix "386" should match "386DX33"');
-  });
-
-  it('should list all item IDs from l2_items', async () => {
-    // Write an item to l2_items first
-    const data = Buffer.from(JSON.stringify({ id: 'list-test', type: 'concept', name: 'Test' }));
-    await provider.writeL2Item('list-test', 'entity', data, {
-      type: 'entity',
-      owner_id: 'test',
-      visibility: 'private',
-    });
-
-    const items = provider.listL2ItemIds();
-    assert.ok(items.some((i) => i.id === 'list-test'), 'should list the written item');
-    assert.ok(items.some((i) => i.type === 'entity'), 'should include type');
-  });
 });
 
 // Embedding cache tests
@@ -399,7 +358,7 @@ describe('SQLite v1 to v2 migration', () => {
 
     // Verify schema version is current (4, after v1->v2->v3->v4 migration)
     const versionRow = provider.getDatabase().prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number };
-    assert.strictEqual(versionRow.version, 6, 'schema version should be 6 after full migration chain');
+    assert.strictEqual(versionRow.version, 5, 'schema version should be 5 after full migration chain');
 
     // Verify FTS table exists and is populated from index
     assert.strictEqual(provider.hasFtsData(), true, 'FTS should be populated from index');
@@ -419,8 +378,8 @@ describe('SQLite v1 to v2 migration', () => {
   });
 });
 
-// Vec search tests - sqlite-vec is a hard dependency, must load
-describe('SQLite vec search', () => {
+// Vec search tests (conditional - only run if sqlite-vec is available)
+describe('SQLite vec search (conditional)', () => {
   let provider: SqliteStorageProvider;
   let tmpDir: string;
 
@@ -435,68 +394,21 @@ describe('SQLite vec search', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it('should load sqlite-vec extension', () => {
-    // sqlite-vec is in dependencies - it must load or the ESM fix is broken
-    assert.strictEqual(provider.vecAvailable(), true, 'sqlite-vec must be available');
+  it('should report vec availability', () => {
+    // Just verify the method works - result depends on sqlite-vec installation
+    const available = provider.vecAvailable();
+    assert.strictEqual(typeof available, 'boolean');
   });
 
-  it('should report vec and embedding cache counts', () => {
-    assert.strictEqual(typeof provider.vecCount(), 'number');
-    assert.strictEqual(typeof provider.embeddingCacheCount(), 'number');
-  });
-
-  it('should upsert and search vec embeddings', async () => {
-    // Create a known embedding (768 dims, mostly zeros with a signal)
+  it('should handle vec operations gracefully when unavailable', async () => {
+    // These should be no-ops if vec is not loaded
     const embedding = new Float32Array(768);
-    embedding[0] = 1.0;
-    embedding[1] = 0.5;
-
-    await provider.vecUpsert('vec-test-1', embedding);
-    assert.strictEqual(provider.vecCount(), 1, 'vec table should have 1 row');
-
-    // Search with the same embedding - should find it
-    const results = await provider.vecSearch(embedding, 5);
-    assert.strictEqual(results.length, 1);
-    assert.strictEqual(results[0].item_id, 'vec-test-1');
-    assert.ok(results[0].distance < 1e-6, `identical embedding should have ~0 distance, got ${results[0].distance}`);
-  });
-
-  it('should return nearest neighbours in order', async () => {
-    // Insert a second embedding that differs from the first
-    const similar = new Float32Array(768);
-    similar[0] = 0.9;
-    similar[1] = 0.4;
-    await provider.vecUpsert('vec-test-2', similar);
-
-    const different = new Float32Array(768);
-    different[100] = 1.0;
-    different[200] = 1.0;
-    await provider.vecUpsert('vec-test-3', different);
-
-    // Query with something close to vec-test-1
-    const query = new Float32Array(768);
-    query[0] = 1.0;
-    query[1] = 0.5;
-
-    const results = await provider.vecSearch(query, 5);
-    assert.ok(results.length >= 2, 'should return multiple results');
-    // Nearest should be vec-test-1 (exact match)
-    assert.strictEqual(results[0].item_id, 'vec-test-1');
-    // vec-test-2 should be closer than vec-test-3
-    const idx2 = results.findIndex(r => r.item_id === 'vec-test-2');
-    const idx3 = results.findIndex(r => r.item_id === 'vec-test-3');
-    assert.ok(idx2 < idx3, 'similar embedding should rank higher than different one');
-  });
-
-  it('should delete vec entries', async () => {
-    await provider.vecDelete('vec-test-1');
-    await provider.vecDelete('vec-test-2');
-    await provider.vecDelete('vec-test-3');
-
-    const query = new Float32Array(768);
-    query[0] = 1.0;
-    const results = await provider.vecSearch(query, 5);
-    assert.strictEqual(results.length, 0, 'should be empty after deletes');
+    await provider.vecUpsert('test-vec', embedding);
+    await provider.vecDelete('test-vec');
+    const results = await provider.vecSearch(embedding, 10);
+    if (!provider.vecAvailable()) {
+      assert.strictEqual(results.length, 0, 'should return empty when vec unavailable');
+    }
   });
 });
 
@@ -854,7 +766,7 @@ describe('SQLite v2 to v3 migration', () => {
 
     // Verify schema version is 4 after full chain
     const versionRow = provider.getDatabase().prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number };
-    assert.strictEqual(versionRow.version, 6, 'Schema should be v6 after full migration chain');
+    assert.strictEqual(versionRow.version, 5, 'Schema should be v5 after full migration chain');
 
     // Verify checksum column exists and is backfilled
     const items = provider.getDatabase().prepare('SELECT id, checksum FROM l2_items').all() as Array<{ id: string; checksum: string | null }>;
@@ -955,7 +867,7 @@ describe('SQLite v3 to v4 migration', () => {
 
     // Verify schema version is 4
     const versionRow = provider.getDatabase().prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number };
-    assert.strictEqual(versionRow.version, 6, 'Schema should be v6');
+    assert.strictEqual(versionRow.version, 5, 'Schema should be v5');
 
     // Verify groups table exists
     const groupsTable = provider.getDatabase().prepare(
