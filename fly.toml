@@ -1,46 +1,23 @@
-# fly.toml - Cordelia combined proxy + core deployment
+# fly.toml app configuration file generated for cordelia-proxy-iiu14g on 2026-02-02T20:31:32Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'seeddrill-proxy'
-primary_region = 'lhr'
+app = 'cordelia-proxy-iiu14g'
+primary_region = 'ams'
 
 [build]
-  dockerfile = 'Dockerfile.fly'
 
-# Single process running both proxy and core
-[processes]
-  app = "sh -c 'mkdir -p /data/core && test -f /data/core/config.toml || cp /home/cordelia/default-config.toml /data/core/config.toml; cordelia-node --config /data/core/config.toml & node /home/cordelia/proxy/dist/http-server.js'"
-
-# HTTP service for proxy dashboard
 [http_service]
-  internal_port = 3847
+  internal_port = 8080
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
   processes = ['app']
-
-# Core P2P service (UDP for QUIC)
-[[services]]
-  internal_port = 9474
-  protocol = 'udp'
-  processes = ['app']
-  [[services.ports]]
-    port = 9474
-
-[mounts]
-  source = 'cordelia_data'
-  destination = '/data'
-
-[env]
-  CORDELIA_MEMORY_ROOT = '/data/memory'
-  CORDELIA_STORAGE = 'sqlite'
-  CORDELIA_CORE_API = 'http://localhost:9473'
-  CORDELIA_NODE_URL = 'http://localhost:9473'
 
 [[vm]]
-  memory = '512mb'
+  memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 256
