@@ -12,6 +12,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import * as os from 'os';
+import { execSync } from 'child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -22,34 +23,67 @@ export const CORDELIA_DIR = path.resolve(__dirname, '..');
 // --- Encryption Key ---
 
 /**
- * Get encryption key from environment, .mcp.json, or ~/.claude.json
- * Needed to pass to ensureServer() so the HTTP sidecar can decrypt.
+ * Get encryption key using 4-tier priority chain:
+ *   1. Vault API     -- if CORDELIA_VAULT_URL + CORDELIA_API_TOKEN configured
+ *   2. Env var       -- CORDELIA_ENCRYPTION_KEY
+ *   3. Keychain      -- macOS Keychain / Linux secret-tool (GNOME Keyring)
+ *   4. File          -- ~/.cordelia/key (0600 permissions)
+ *
+ * Returns key string or null. Never throws.
  */
 export async function getEncryptionKey() {
+  // 1. Vault API
+  const vaultUrl = process.env.CORDELIA_VAULT_URL;
+  const apiToken = process.env.CORDELIA_API_TOKEN;
+  if (vaultUrl && apiToken) {
+    try {
+      const res = await fetch(`${vaultUrl}/api/key`, {
+        headers: { 'Authorization': `Bearer ${apiToken}` }
+      });
+      if (res.ok) {
+        const { key } = await res.json();
+        if (key) return key;
+      }
+    } catch {
+      // Vault unavailable, fall through to local chain
+    }
+  }
+
+  // 2. Environment variable
   if (process.env.CORDELIA_ENCRYPTION_KEY) {
     return process.env.CORDELIA_ENCRYPTION_KEY;
   }
 
-  // Try project .mcp.json
-  const projectMcpPath = path.join(CORDELIA_DIR, '..', 'seed-drill', '.mcp.json');
+  // 3. Platform keychain
+  const platform = os.platform();
   try {
-    const content = await fs.readFile(projectMcpPath, 'utf-8');
-    const mcp = JSON.parse(content);
-    const key = mcp.mcpServers?.cordelia?.env?.CORDELIA_ENCRYPTION_KEY;
-    if (key) return key;
+    if (platform === 'darwin') {
+      const key = execSync(
+        'security find-generic-password -a cordelia -s cordelia-encryption-key -w',
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+      ).trim();
+      if (key) return key;
+    } else if (platform === 'linux') {
+      const key = execSync(
+        'secret-tool lookup service cordelia type encryption-key',
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+      ).trim();
+      if (key) return key;
+    }
   } catch {
-    // Fall through
+    // Keychain not available or item not found, fall through
   }
 
-  // Fallback to global MCP config (~/.claude.json)
-  const globalMcpPath = path.join(os.homedir(), '.claude.json');
+  // 4. File fallback (~/.cordelia/key)
+  const keyFilePath = path.join(os.homedir(), '.cordelia', 'key');
   try {
-    const content = await fs.readFile(globalMcpPath, 'utf-8');
-    const mcp = JSON.parse(content);
-    return mcp.mcpServers?.cordelia?.env?.CORDELIA_ENCRYPTION_KEY || null;
+    const key = (await fs.readFile(keyFilePath, 'utf-8')).trim();
+    if (key) return key;
   } catch {
-    return null;
+    // File not found, fall through
   }
+
+  return null;
 }
 
 // --- Content & Chain Hashing ---

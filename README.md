@@ -28,38 +28,36 @@ L2 items are encrypted at rest using AES-256-GCM with scrypt key derivation. Emb
 
 ## Installation
 
-### One-Click Install (Recommended)
+### One-Command Install (Recommended)
 
 ```bash
-# Clone the repo
+curl -fsSL https://seeddrill.ai/install.sh | sh -s -- <your-username>
+```
+
+Or clone and run locally:
+
+```bash
 git clone https://github.com/seed-drill/cordelia-proxy.git
 cd cordelia-proxy
-
-# Run installer
 ./install.sh <your-username>
+```
 
-# For Intel Macs (no Ollama/embeddings):
+For Intel Macs (no Ollama/embeddings):
+
+```bash
 ./install.sh <your-username> --no-embeddings
 ```
 
-The installer handles everything:
-1. Checks/installs prerequisites (Node.js via Homebrew)
-2. Builds Cordelia
-3. Generates encryption key
-4. Creates your L1 memory context
-5. Configures Claude Code hooks automatically
-6. Sets up shell environment
-7. Validates installation
+The installer:
+1. Detects platform (macOS/Linux, x86_64/aarch64)
+2. Downloads precompiled `cordelia-node` binary
+3. Builds the MCP proxy from source (Node.js required)
+4. Generates encryption key, stores in platform keychain
+5. Creates config, seeds L1 memory context
+6. Configures Claude Code (MCP server, hooks, skills)
+7. Starts `cordelia-node` as a background service (launchd/systemd)
 
-Then just open a new terminal and run `claude`.
-
-### Manual Installation
-
-```bash
-npm install
-npm run build
-./setup.sh <username>  # Generates config, outputs settings to copy manually
-```
+Then open a new terminal and run `claude`.
 
 ## Configuration
 
@@ -74,12 +72,15 @@ The installer automatically configures `~/.claude.json` (global MCP config):
       "command": "node",
       "args": ["/path/to/cordelia-proxy/dist/server.js"],
       "env": {
-        "CORDELIA_ENCRYPTION_KEY": "your-64-char-hex-key"
+        "CORDELIA_STORAGE": "sqlite",
+        "CORDELIA_MEMORY_ROOT": "~/.cordelia/memory"
       }
     }
   }
 }
 ```
+
+The encryption key is **not** stored in MCP config or shell profiles. It is retrieved at runtime from the platform keychain (macOS Keychain / Linux GNOME Keyring) or `~/.cordelia/key`. See [docs/KEY-MANAGEMENT.md](docs/KEY-MANAGEMENT.md) for details.
 
 ### Environment Variables
 

@@ -1,0 +1,25 @@
+[Unit]
+Description=Cordelia P2P Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__HOME__/.cordelia/bin/cordelia-node --config __HOME__/.cordelia/config.toml
+Restart=on-failure
+RestartSec=10
+WorkingDirectory=__HOME__/.cordelia
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cordelia-node
+
+# Security hardening (user-level)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__HOME__/.cordelia
+
+[Install]
+WantedBy=default.target
