@@ -41,7 +41,13 @@ NC='\033[0m'
 info()  { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-phase() { echo ""; echo -e "${BLUE}--- Phase $1: $2 ---${NC}"; }
+phase() {
+    local num="$1"
+    local label="$2"
+    echo ""
+    echo -e "${BLUE}--- Phase ${num}: ${label} ---${NC}"
+    return 0
+}
 
 # --- Parse arguments ---
 
@@ -59,14 +65,14 @@ for arg in "$@"; do
             exit 0
             ;;
         *)
-            if [ -z "$USER_ID" ]; then
+            if [[ -z "$USER_ID" ]]; then
                 USER_ID="$arg"
             fi
             ;;
     esac
 done
 
-if [ -z "$USER_ID" ]; then
+if [[ -z "$USER_ID" ]]; then
     echo "Cordelia Universal Installer"
     echo ""
     echo "Usage: ./install.sh <user_id>"
@@ -80,7 +86,7 @@ echo "   Cordelia Universal Installer"
 echo "========================================"
 echo ""
 echo "Installing for user: $USER_ID"
-[ "$NO_EMBEDDINGS" = true ] && echo "Mode: No embeddings (Intel Mac compatible)"
+[[ "$NO_EMBEDDINGS" = true ]] && echo "Mode: No embeddings (Intel Mac compatible)"
 echo ""
 
 # ============================================
@@ -110,6 +116,7 @@ case "${OS_NAME}-${ARCH_NAME}" in
     macos-aarch64)  TARGET="aarch64-apple-darwin" ;;
     linux-x86_64)   TARGET="x86_64-unknown-linux-gnu" ;;
     linux-aarch64)  TARGET="aarch64-unknown-linux-gnu" ;;
+    *)              error "Unsupported platform: ${OS_NAME}-${ARCH_NAME}" ;;
 esac
 
 info "Platform: $OS_NAME $ARCH_NAME -> $TARGET"
@@ -122,7 +129,7 @@ phase 2 "Prerequisites"
 # Node.js
 if ! command -v node &> /dev/null; then
     warn "Node.js not found. Installing..."
-    if [ "$OS_NAME" = "macos" ]; then
+    if [[ "$OS_NAME" = "macos" ]]; then
         if ! command -v brew &> /dev/null; then
             warn "Homebrew not found. Required for Node.js on macOS."
             echo ""
@@ -136,7 +143,7 @@ if ! command -v node &> /dev/null; then
             fi
         fi
         brew install node
-    elif [ "$OS_NAME" = "linux" ]; then
+    elif [[ "$OS_NAME" = "linux" ]]; then
         curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
         sudo apt-get install -y nodejs
     fi
@@ -147,7 +154,7 @@ fi
 
 # Claude Code
 if ! command -v claude &> /dev/null; then
-    if [ "$OS_NAME" = "linux" ]; then
+    if [[ "$OS_NAME" = "linux" ]]; then
         warn "Claude Code not found. Installing via npm..."
         sudo npm install -g @anthropic-ai/claude-code
         command -v claude &> /dev/null || error "Claude Code install failed. Install manually: npm install -g @anthropic-ai/claude-code"
@@ -175,7 +182,7 @@ BINARY_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_
 CHECKSUM_URL="${BINARY_URL}.sha256"
 BINARY_PATH="${CORDELIA_BIN}/cordelia-node"
 
-if [ -f "$BINARY_PATH" ]; then
+if [[ -f "$BINARY_PATH" ]]; then
     info "cordelia-node already installed at $BINARY_PATH"
     info "Re-downloading to check for updates..."
 fi
@@ -187,7 +194,7 @@ curl -fsSL -o "${CORDELIA_BIN}/${BINARY_NAME}.sha256" "$CHECKSUM_URL" || error "
 # Verify SHA256
 echo "Verifying checksum..."
 cd "$CORDELIA_BIN"
-if [ "$OS_NAME" = "macos" ]; then
+if [[ "$OS_NAME" = "macos" ]]; then
     shasum -a 256 -c "${BINARY_NAME}.sha256" || error "Checksum verification failed. Binary may be corrupt."
 else
     sha256sum -c "${BINARY_NAME}.sha256" || error "Checksum verification failed. Binary may be corrupt."
@@ -207,14 +214,14 @@ phase 4 "Clone + build proxy"
 
 PROXY_DIR="$CORDELIA_HOME/proxy"
 
-if [ -d "$PROXY_DIR/.git" ]; then
+if [[ -d "$PROXY_DIR/.git" ]]; then
     info "Proxy already cloned at $PROXY_DIR"
     cd "$PROXY_DIR"
     git pull --ff-only 2>/dev/null || warn "Could not fast-forward proxy. Continuing with existing version."
 else
     # Check if we're running from inside the proxy repo
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-    if [ -f "$SCRIPT_DIR/package.json" ] && grep -q '"cordelia-proxy"' "$SCRIPT_DIR/package.json" 2>/dev/null; then
+    if [[ -f "$SCRIPT_DIR/package.json" ]] && grep -q '"cordelia-proxy"' "$SCRIPT_DIR/package.json" 2>/dev/null; then
         info "Running from proxy repo at $SCRIPT_DIR"
         PROXY_DIR="$SCRIPT_DIR"
     else
@@ -225,7 +232,7 @@ fi
 
 cd "$PROXY_DIR"
 
-if [ ! -d "node_modules" ]; then
+if [[ ! -d "node_modules" ]]; then
     npm install --silent
 fi
 info "Dependencies installed"
@@ -245,7 +252,7 @@ info "Generated 64-character hex encryption key"
 # Store in platform keychain (no plaintext in shell profile)
 KEY_STORED=false
 
-if [ "$OS_NAME" = "macos" ]; then
+if [[ "$OS_NAME" = "macos" ]]; then
     # macOS Keychain
     if security add-generic-password -a cordelia -s cordelia-encryption-key -w "$ENCRYPTION_KEY" -U 2>/dev/null; then
         KEY_STORED=true
@@ -253,11 +260,11 @@ if [ "$OS_NAME" = "macos" ]; then
     else
         warn "Could not store key in Keychain"
     fi
-elif [ "$OS_NAME" = "linux" ]; then
+elif [[ "$OS_NAME" = "linux" ]]; then
     # Linux: GNOME Keyring via secret-tool
     if command -v secret-tool &> /dev/null; then
         echo -n "$ENCRYPTION_KEY" | secret-tool store --label='Cordelia Encryption Key' service cordelia type encryption-key 2>/dev/null
-        if [ $? -eq 0 ]; then
+        if [[ $? -eq 0 ]]; then
             KEY_STORED=true
             info "Encryption key stored in GNOME Keyring"
         else
@@ -269,7 +276,7 @@ elif [ "$OS_NAME" = "linux" ]; then
 fi
 
 # Fallback: file with restrictive permissions
-if [ "$KEY_STORED" = false ]; then
+if [[ "$KEY_STORED" = false ]]; then
     KEY_FILE="$CORDELIA_HOME/key"
     echo -n "$ENCRYPTION_KEY" > "$KEY_FILE"
     chmod 0600 "$KEY_FILE"
@@ -277,7 +284,7 @@ if [ "$KEY_STORED" = false ]; then
 fi
 
 # --- Node identity key ---
-if [ -f "$CORDELIA_HOME/node.key" ]; then
+if [[ -f "$CORDELIA_HOME/node.key" ]]; then
     info "Node identity key already exists"
 else
     if "$BINARY_PATH" identity generate --output "$CORDELIA_HOME/node.key" 2>/dev/null; then
@@ -297,7 +304,7 @@ phase 6 "Write config + seed L1"
 
 CORDELIA_CONFIG="$CORDELIA_HOME/config.toml"
 
-if [ ! -f "$CORDELIA_CONFIG" ]; then
+if [[ ! -f "$CORDELIA_CONFIG" ]]; then
     cat > "$CORDELIA_CONFIG" << NODEEOF
 # Cordelia configuration
 # Generated by install.sh for user: ${USER_ID}
@@ -355,7 +362,7 @@ fi
 SALT_DIR="$MEMORY_ROOT/L2-warm/.salt"
 SALT_FILE="$SALT_DIR/global.salt"
 mkdir -p "$SALT_DIR"
-if [ ! -f "$SALT_FILE" ]; then
+if [[ ! -f "$SALT_FILE" ]]; then
     openssl rand -out "$SALT_FILE" 32
     info "Generated encryption salt"
 fi
@@ -365,7 +372,7 @@ echo "Seeding L1 memory for $USER_ID..."
 export CORDELIA_ENCRYPTION_KEY="$ENCRYPTION_KEY"
 export CORDELIA_MEMORY_ROOT="$MEMORY_ROOT"
 export CORDELIA_STORAGE=sqlite
-[ "$NO_EMBEDDINGS" = true ] && export CORDELIA_EMBEDDING_PROVIDER=none
+[[ "$NO_EMBEDDINGS" = true ]] && export CORDELIA_EMBEDDING_PROVIDER=none
 node "$PROXY_DIR/scripts/seed-l1.mjs" "$USER_ID"
 info "L1 context seeded"
 
@@ -382,7 +389,7 @@ mkdir -p "$CLAUDE_DIR"
 
 # --- MCP server config (NO encryption key in env -- retrieved at runtime) ---
 ENV_STORAGE="{\"CORDELIA_STORAGE\": \"sqlite\", \"CORDELIA_MEMORY_ROOT\": \"$MEMORY_ROOT\"}"
-if [ "$NO_EMBEDDINGS" = true ]; then
+if [[ "$NO_EMBEDDINGS" = true ]]; then
     ENV_STORAGE="{\"CORDELIA_EMBEDDING_PROVIDER\": \"none\", \"CORDELIA_STORAGE\": \"sqlite\", \"CORDELIA_MEMORY_ROOT\": \"$MEMORY_ROOT\"}"
 fi
 
@@ -448,12 +455,12 @@ SKILLS_DEST="$CLAUDE_DIR/skills"
 mkdir -p "$SKILLS_DEST"
 
 for skill_dir in "$SKILLS_SRC"/*; do
-    if [ -d "$skill_dir" ]; then
+    if [[ -d "$skill_dir" ]]; then
         skill_name=$(basename "$skill_dir")
         dest_dir="$SKILLS_DEST/$skill_name"
         mkdir -p "$dest_dir"
         for file in "$skill_dir"/*; do
-            if [ -f "$file" ]; then
+            if [[ -f "$file" ]]; then
                 sed "s/__USER_ID__/$USER_ID/g" "$file" > "$dest_dir/$(basename "$file")"
             fi
         done
@@ -467,19 +474,19 @@ info "Skills installed: persist, sprint, remember"
 phase 8 "Shell environment"
 
 # Add ~/.cordelia/bin to PATH (but NOT the encryption key)
-if [ "$OS_NAME" = "linux" ]; then
-    if [ -f "$HOME/.bashrc" ]; then
+if [[ "$OS_NAME" = "linux" ]]; then
+    if [[ -f "$HOME/.bashrc" ]]; then
         SHELL_PROFILE="$HOME/.bashrc"
-    elif [ -f "$HOME/.zshrc" ]; then
+    elif [[ -f "$HOME/.zshrc" ]]; then
         SHELL_PROFILE="$HOME/.zshrc"
     else
         SHELL_PROFILE="$HOME/.bashrc"
         touch "$SHELL_PROFILE"
     fi
 else
-    if [ -f "$HOME/.zshrc" ]; then
+    if [[ -f "$HOME/.zshrc" ]]; then
         SHELL_PROFILE="$HOME/.zshrc"
-    elif [ -f "$HOME/.bashrc" ]; then
+    elif [[ -f "$HOME/.bashrc" ]]; then
         SHELL_PROFILE="$HOME/.bashrc"
     else
         SHELL_PROFILE="$HOME/.zshrc"
@@ -513,13 +520,13 @@ export PATH="$CORDELIA_BIN:$PATH"
 # ============================================
 phase 9 "Start node service"
 
-if [ "$OS_NAME" = "macos" ]; then
+if [[ "$OS_NAME" = "macos" ]]; then
     # launchd
     PLIST_LABEL="ai.seeddrill.cordelia"
     PLIST_SRC="$PROXY_DIR/setup/ai.seeddrill.cordelia.plist"
     PLIST_DEST="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
-    if [ -f "$PLIST_SRC" ]; then
+    if [[ -f "$PLIST_SRC" ]]; then
         mkdir -p "$HOME/Library/LaunchAgents"
         # Substitute home directory in plist
         sed "s|__HOME__|$HOME|g" "$PLIST_SRC" > "$PLIST_DEST"
@@ -535,13 +542,13 @@ if [ "$OS_NAME" = "macos" ]; then
         echo "Start manually: cordelia-node --config $CORDELIA_HOME/config.toml"
     fi
 
-elif [ "$OS_NAME" = "linux" ]; then
+elif [[ "$OS_NAME" = "linux" ]]; then
     # systemd user unit
     UNIT_SRC="$PROXY_DIR/setup/cordelia-node.service"
     UNIT_DIR="$HOME/.config/systemd/user"
     UNIT_DEST="$UNIT_DIR/cordelia-node.service"
 
-    if [ -f "$UNIT_SRC" ]; then
+    if [[ -f "$UNIT_SRC" ]]; then
         mkdir -p "$UNIT_DIR"
         sed "s|__HOME__|$HOME|g" "$UNIT_SRC" > "$UNIT_DEST"
 
@@ -564,18 +571,18 @@ echo ""
 echo "--- Validation ---"
 ERRORS=0
 
-[ -x "$BINARY_PATH" ] && info "cordelia-node binary" || { warn "cordelia-node binary missing"; ERRORS=$((ERRORS+1)); }
-[ -f "$PROXY_DIR/dist/server.js" ] && info "MCP proxy built" || { warn "MCP proxy missing"; ERRORS=$((ERRORS+1)); }
-[ -f "$GLOBAL_MCP" ] && info "MCP config (~/.claude.json)" || { warn "MCP config missing"; ERRORS=$((ERRORS+1)); }
-[ -f "$SETTINGS_FILE" ] && info "Claude hooks" || { warn "Claude hooks missing"; ERRORS=$((ERRORS+1)); }
-[ -d "$SKILLS_DEST/persist" ] && info "Skills installed" || { warn "Skills missing"; ERRORS=$((ERRORS+1)); }
-[ -f "$CORDELIA_CONFIG" ] && info "Node config" || { warn "Node config missing"; ERRORS=$((ERRORS+1)); }
+[[ -x "$BINARY_PATH" ]] && info "cordelia-node binary" || { warn "cordelia-node binary missing"; ERRORS=$((ERRORS+1)); }
+[[ -f "$PROXY_DIR/dist/server.js" ]] && info "MCP proxy built" || { warn "MCP proxy missing"; ERRORS=$((ERRORS+1)); }
+[[ -f "$GLOBAL_MCP" ]] && info "MCP config (~/.claude.json)" || { warn "MCP config missing"; ERRORS=$((ERRORS+1)); }
+[[ -f "$SETTINGS_FILE" ]] && info "Claude hooks" || { warn "Claude hooks missing"; ERRORS=$((ERRORS+1)); }
+[[ -d "$SKILLS_DEST/persist" ]] && info "Skills installed" || { warn "Skills missing"; ERRORS=$((ERRORS+1)); }
+[[ -f "$CORDELIA_CONFIG" ]] && info "Node config" || { warn "Node config missing"; ERRORS=$((ERRORS+1)); }
 
 CORDELIA_DB="$MEMORY_ROOT/cordelia.db"
-[ -f "$CORDELIA_DB" ] && [ -s "$CORDELIA_DB" ] && info "L1 memory seeded" || { warn "L1 memory missing"; ERRORS=$((ERRORS+1)); }
+[[ -f "$CORDELIA_DB" ]] && [[ -s "$CORDELIA_DB" ]] && info "L1 memory seeded" || { warn "L1 memory missing"; ERRORS=$((ERRORS+1)); }
 
 KEY_LEN=${#ENCRYPTION_KEY}
-[ "$KEY_LEN" -eq 64 ] && info "Encryption key valid (64 chars)" || { warn "Encryption key wrong length: $KEY_LEN"; ERRORS=$((ERRORS+1)); }
+[[ "$KEY_LEN" -eq 64 ]] && info "Encryption key valid (64 chars)" || { warn "Encryption key wrong length: $KEY_LEN"; ERRORS=$((ERRORS+1)); }
 
 # Verify key NOT in shell profile
 if grep -q "CORDELIA_ENCRYPTION_KEY" "$SHELL_PROFILE" 2>/dev/null; then
@@ -585,7 +592,7 @@ else
     info "No plaintext key in shell profile"
 fi
 
-if [ $ERRORS -gt 0 ]; then
+if [[ $ERRORS -gt 0 ]]; then
     warn "Completed with $ERRORS warnings"
 else
     info "All validations passed"
@@ -616,7 +623,7 @@ echo "  2. Run 'claude' from any directory"
 echo "  3. You should see: [CORDELIA] Session 1 | Genesis..."
 echo ""
 
-if [ "$KEY_STORED" = true ]; then
+if [[ "$KEY_STORED" = true ]]; then
     echo "Your encryption key is stored securely in the platform keychain."
 else
     echo "IMPORTANT: Your encryption key is stored in ~/.cordelia/key"

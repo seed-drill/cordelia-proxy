@@ -12,7 +12,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import * as os from 'os';
-import { execSync } from 'child_process';
+import { execSync } from 'node:child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -21,6 +21,50 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const CORDELIA_DIR = path.resolve(__dirname, '..');
 
 // --- Encryption Key ---
+
+/** Attempt to retrieve key from vault API. */
+async function getKeyFromVault() {
+  const vaultUrl = process.env.CORDELIA_VAULT_URL;
+  const apiToken = process.env.CORDELIA_API_TOKEN;
+  if (!vaultUrl || !apiToken) return null;
+
+  try {
+    const res = await fetch(`${vaultUrl}/api/key`, {
+      headers: { 'Authorization': `Bearer ${apiToken}` }
+    });
+    if (!res.ok) return null;
+    const { key } = await res.json();
+    return key || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Attempt to retrieve key from platform keychain. */
+function getKeyFromKeychain() {
+  const cmds = {
+    darwin: 'security find-generic-password -a cordelia -s cordelia-encryption-key -w',
+    linux: 'secret-tool lookup service cordelia type encryption-key',
+  };
+  const cmd = cmds[os.platform()];
+  if (!cmd) return null;
+
+  try {
+    return execSync(cmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Attempt to retrieve key from ~/.cordelia/key file. */
+async function getKeyFromFile() {
+  try {
+    const key = (await fs.readFile(path.join(os.homedir(), '.cordelia', 'key'), 'utf-8')).trim();
+    return key || null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Get encryption key using 4-tier priority chain:
@@ -32,58 +76,10 @@ export const CORDELIA_DIR = path.resolve(__dirname, '..');
  * Returns key string or null. Never throws.
  */
 export async function getEncryptionKey() {
-  // 1. Vault API
-  const vaultUrl = process.env.CORDELIA_VAULT_URL;
-  const apiToken = process.env.CORDELIA_API_TOKEN;
-  if (vaultUrl && apiToken) {
-    try {
-      const res = await fetch(`${vaultUrl}/api/key`, {
-        headers: { 'Authorization': `Bearer ${apiToken}` }
-      });
-      if (res.ok) {
-        const { key } = await res.json();
-        if (key) return key;
-      }
-    } catch {
-      // Vault unavailable, fall through to local chain
-    }
-  }
-
-  // 2. Environment variable
-  if (process.env.CORDELIA_ENCRYPTION_KEY) {
-    return process.env.CORDELIA_ENCRYPTION_KEY;
-  }
-
-  // 3. Platform keychain
-  const platform = os.platform();
-  try {
-    if (platform === 'darwin') {
-      const key = execSync(
-        'security find-generic-password -a cordelia -s cordelia-encryption-key -w',
-        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
-      ).trim();
-      if (key) return key;
-    } else if (platform === 'linux') {
-      const key = execSync(
-        'secret-tool lookup service cordelia type encryption-key',
-        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
-      ).trim();
-      if (key) return key;
-    }
-  } catch {
-    // Keychain not available or item not found, fall through
-  }
-
-  // 4. File fallback (~/.cordelia/key)
-  const keyFilePath = path.join(os.homedir(), '.cordelia', 'key');
-  try {
-    const key = (await fs.readFile(keyFilePath, 'utf-8')).trim();
-    if (key) return key;
-  } catch {
-    // File not found, fall through
-  }
-
-  return null;
+  return (await getKeyFromVault())
+    ?? process.env.CORDELIA_ENCRYPTION_KEY
+    ?? getKeyFromKeychain()
+    ?? (await getKeyFromFile());
 }
 
 // --- Content & Chain Hashing ---
