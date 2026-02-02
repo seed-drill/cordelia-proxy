@@ -11,10 +11,9 @@ import Database from 'better-sqlite3';
 import * as crypto from 'crypto';
 import * as path from 'path';
 import * as fs from 'fs';
-import { createRequire } from 'module';
 import type { StorageProvider, L2ItemMeta, GroupRow, GroupMemberRow, AccessLogEntry } from './storage.js';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 5;
 
 const SCHEMA_V1_SQL = `
 CREATE TABLE IF NOT EXISTS l1_hot (
@@ -132,10 +131,6 @@ export class SqliteStorageProvider implements StorageProvider {
 
     if (currentVersion < 5) {
       this.migrateToV5();
-    }
-
-    if (currentVersion < 6) {
-      this.migrateToV6();
     }
 
     // Try to load sqlite-vec
@@ -339,92 +334,106 @@ export class SqliteStorageProvider implements StorageProvider {
   }
 
   private migrateToV5(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS sync_state (
-        group_id TEXT PRIMARY KEY,
-        last_sync_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-    `);
-    this.db.prepare('UPDATE schema_version SET version = ?, migrated_at = datetime(\'now\')').run(SCHEMA_VERSION);
-  }
+    const tx = this.db.transaction(() => {
+      // OAuth 2.0 Clients (RFC 7591 Dynamic Client Registration)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS oauth_clients (
+          client_id TEXT PRIMARY KEY,
+          client_secret_hash TEXT,
+          client_id_issued_at INTEGER NOT NULL,
+          client_secret_expires_at INTEGER,
+          redirect_uris TEXT NOT NULL,
+          token_endpoint_auth_method TEXT DEFAULT 'client_secret_post',
+          grant_types TEXT DEFAULT '["authorization_code","refresh_token"]',
+          response_types TEXT DEFAULT '["code"]',
+          client_name TEXT,
+          client_uri TEXT,
+          logo_uri TEXT,
+          scope TEXT,
+          contacts TEXT,
+          software_id TEXT,
+          software_version TEXT,
+          owner_user_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
 
-  private migrateToV6(): void {
-    // Add domain and ttl_expires_at columns (O(1) in SQLite, no table rebuild)
-    try {
-      this.db.exec(`ALTER TABLE l2_items ADD COLUMN domain TEXT CHECK(domain IS NULL OR domain IN ('value', 'procedural', 'interrupt'))`);
-    } catch {
-      // Column may already exist from partial migration
-    }
-    try {
-      this.db.exec('ALTER TABLE l2_items ADD COLUMN ttl_expires_at TEXT');
-    } catch {
-      // Column may already exist
-    }
+      // Authorization codes (short-lived, used during OAuth flow)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+          code_hash TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          redirect_uri TEXT NOT NULL,
+          scope TEXT,
+          code_challenge TEXT NOT NULL,
+          code_challenge_method TEXT DEFAULT 'S256',
+          expires_at INTEGER NOT NULL,
+          resource TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
 
-    // Partial indexes for domain queries
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_l2_items_domain ON l2_items(domain) WHERE domain IS NOT NULL');
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_l2_items_ttl ON l2_items(ttl_expires_at) WHERE ttl_expires_at IS NOT NULL');
+      // Access tokens
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+          token_hash TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          scope TEXT,
+          expires_at INTEGER NOT NULL,
+          resource TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
 
-    // Conservative backfill: sessions -> interrupt, learnings/entities -> procedural
-    this.db.exec("UPDATE l2_items SET domain = 'interrupt' WHERE type = 'session' AND domain IS NULL");
-    this.db.exec("UPDATE l2_items SET domain = 'procedural' WHERE type = 'learning' AND domain IS NULL");
-    this.db.exec("UPDATE l2_items SET domain = 'procedural' WHERE type = 'entity' AND domain IS NULL");
+      // Refresh tokens
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+          token_hash TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          scope TEXT,
+          expires_at INTEGER,
+          resource TEXT,
+          revoked_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
 
-    this.db.prepare('UPDATE schema_version SET version = ?, migrated_at = datetime(\'now\')').run(SCHEMA_VERSION);
+      // Indexes for OAuth tables
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_oauth_codes_client ON oauth_authorization_codes(client_id);
+        CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires ON oauth_authorization_codes(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_client ON oauth_access_tokens(client_id);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_expires ON oauth_access_tokens(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_oauth_tokens_user ON oauth_access_tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_oauth_refresh_client ON oauth_refresh_tokens(client_id);
+        CREATE INDEX IF NOT EXISTS idx_oauth_refresh_user ON oauth_refresh_tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_oauth_clients_owner ON oauth_clients(owner_user_id);
+      `);
+
+      // Update schema version
+      this.db.prepare('UPDATE schema_version SET version = ?, migrated_at = datetime(\'now\')').run(SCHEMA_VERSION);
+    });
+    tx();
   }
 
   private loadSqliteVec(): void {
     try {
-      const require = createRequire(import.meta.url);
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const sqliteVec = require('sqlite-vec');
       sqliteVec.load(this.db);
-
-      // Migrate from L2 (Euclidean) to cosine distance metric if needed.
-      // vec0 tables don't expose their config, so check for the sentinel row.
-      const needsMigration = (() => {
-        try {
-          const sentinel = this.db.prepare(
-            "SELECT 1 FROM l2_vec_meta WHERE key = 'distance_metric' AND value = 'cosine'"
-          ).get();
-          return !sentinel;
-        } catch {
-          // l2_vec_meta doesn't exist yet — migration needed
-          return true;
-        }
-      })();
-
-      if (needsMigration) {
-        console.error('Cordelia: migrating l2_vec to cosine distance metric');
-        this.db.exec('DROP TABLE IF EXISTS l2_vec');
-        this.db.exec(`
-          CREATE VIRTUAL TABLE l2_vec USING vec0(
-            item_id TEXT PRIMARY KEY,
-            embedding float[768] distance_metric=cosine
-          );
-        `);
-        this.db.exec(`
-          CREATE TABLE IF NOT EXISTS l2_vec_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-          );
-        `);
-        this.db.prepare(
-          "INSERT OR REPLACE INTO l2_vec_meta (key, value) VALUES ('distance_metric', 'cosine')"
-        ).run();
-      } else {
-        this.db.exec(`
-          CREATE VIRTUAL TABLE IF NOT EXISTS l2_vec USING vec0(
-            item_id TEXT PRIMARY KEY,
-            embedding float[768] distance_metric=cosine
-          );
-        `);
-      }
-
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS l2_vec USING vec0(
+          item_id TEXT PRIMARY KEY,
+          embedding float[768]
+        );
+      `);
       this.vecLoaded = true;
-      console.error('Cordelia: sqlite-vec loaded successfully (cosine distance)');
-    } catch (e) {
-      console.error(`Cordelia: sqlite-vec not available: ${(e as Error).message}`);
+    } catch {
+      // sqlite-vec not available - graceful degradation
       this.vecLoaded = false;
     }
   }
@@ -469,15 +478,11 @@ export class SqliteStorageProvider implements StorageProvider {
     return row ? { data: row.data, type: row.type } : null;
   }
 
-  listL2ItemIds(): Array<{ id: string; type: string }> {
-    return this.db.prepare('SELECT id, type FROM l2_items').all() as Array<{ id: string; type: string }>;
-  }
-
   async writeL2Item(id: string, type: string, data: Buffer, meta: L2ItemMeta): Promise<void> {
     const checksum = crypto.createHash('sha256').update(data).digest('hex');
     this.db.prepare(`
-      INSERT INTO l2_items (id, type, owner_id, visibility, data, checksum, group_id, author_id, key_version, parent_id, is_copy, domain, ttl_expires_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      INSERT INTO l2_items (id, type, owner_id, visibility, data, checksum, group_id, author_id, key_version, parent_id, is_copy, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(id) DO UPDATE SET
         type = excluded.type,
         owner_id = excluded.owner_id,
@@ -489,8 +494,6 @@ export class SqliteStorageProvider implements StorageProvider {
         key_version = excluded.key_version,
         parent_id = excluded.parent_id,
         is_copy = excluded.is_copy,
-        domain = excluded.domain,
-        ttl_expires_at = excluded.ttl_expires_at,
         updated_at = datetime('now')
     `).run(
       id, type,
@@ -502,20 +505,11 @@ export class SqliteStorageProvider implements StorageProvider {
       meta.key_version ?? 1,
       meta.parent_id || null,
       meta.is_copy ? 1 : 0,
-      meta.domain || null,
-      meta.ttl_expires_at || null,
     );
   }
 
   async deleteL2Item(id: string): Promise<boolean> {
     const result = this.db.prepare('DELETE FROM l2_items WHERE id = ?').run(id);
-    if (result.changes > 0) {
-      // Cascade to FTS and vec to prevent orphaned index entries
-      this.db.prepare('DELETE FROM l2_fts WHERE item_id = ?').run(id);
-      if (this.vecLoaded) {
-        this.db.prepare('DELETE FROM l2_vec WHERE item_id = ?').run(id);
-      }
-    }
     return result.changes > 0;
   }
 
@@ -553,9 +547,9 @@ export class SqliteStorageProvider implements StorageProvider {
   async ftsSearch(query: string, limit: number): Promise<Array<{ item_id: string; rank: number }>> {
     if (!query.trim()) return [];
 
-    // Sanitize query: split on whitespace, wrap each token in double quotes with prefix matching
+    // Sanitize query: split on whitespace, wrap each token in double quotes
     const tokens = query.trim().split(/\s+/).filter(Boolean);
-    const safeQuery = tokens.map((t) => `"${t.replace(/"/g, '')}"*`).join(' ');
+    const safeQuery = tokens.map((t) => `"${t.replace(/"/g, '')}"`).join(' ');
 
     if (!safeQuery) return [];
 
@@ -647,13 +641,13 @@ export class SqliteStorageProvider implements StorageProvider {
 
   // -- Prefetch (R3-012) --
 
-  async getRecentItems(entityId: string, groupIds: string[], limit: number): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null; domain: string | null }>> {
+  async getRecentItems(entityId: string, groupIds: string[], limit: number): Promise<Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null }>> {
     // Build query: private items owned by entity + items in specified groups
     // Ordered by last_accessed_at DESC (most recently accessed first)
     const placeholders = groupIds.map(() => '?').join(',');
     const params: (string | number)[] = [];
 
-    let sql = `SELECT id, type, group_id, last_accessed_at, domain FROM l2_items WHERE (`;
+    let sql = `SELECT id, type, group_id, last_accessed_at FROM l2_items WHERE (`;
 
     // Private items owned by this entity
     sql += `(visibility = 'private' AND owner_id = ?)`;
@@ -668,7 +662,7 @@ export class SqliteStorageProvider implements StorageProvider {
     sql += `) ORDER BY last_accessed_at DESC NULLS LAST LIMIT ?`;
     params.push(limit);
 
-    return this.db.prepare(sql).all(...params) as Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null; domain: string | null }>;
+    return this.db.prepare(sql).all(...params) as Array<{ id: string; type: string; group_id: string | null; last_accessed_at: string | null }>;
   }
 
   // -- Audit --
@@ -742,12 +736,6 @@ export class SqliteStorageProvider implements StorageProvider {
     }
     if (currentVersion < 4) {
       this.migrateToV4();
-    }
-    if (currentVersion < 5) {
-      this.migrateToV5();
-    }
-    if (currentVersion < 6) {
-      this.migrateToV6();
     }
 
     // Rebuild FTS from l2_items
@@ -879,81 +867,11 @@ export class SqliteStorageProvider implements StorageProvider {
     ).all(groupId, limit) as Array<{ id: string; type: string; data: Buffer }>;
   }
 
-  async readL2ItemMeta(id: string): Promise<{ owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number; domain: string | null; ttl_expires_at: string | null } | null> {
+  async readL2ItemMeta(id: string): Promise<{ owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number } | null> {
     const row = this.db.prepare(
-      'SELECT owner_id, visibility, group_id, author_id, key_version, parent_id, is_copy, domain, ttl_expires_at FROM l2_items WHERE id = ?'
-    ).get(id) as { owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number; domain: string | null; ttl_expires_at: string | null } | undefined;
+      'SELECT owner_id, visibility, group_id, author_id, key_version, parent_id, is_copy FROM l2_items WHERE id = ?'
+    ).get(id) as { owner_id: string | null; visibility: string; group_id: string | null; author_id: string | null; key_version: number; parent_id: string | null; is_copy: number } | undefined;
     return row || null;
-  }
-
-  // -- Domain-aware queries (R3-domain) --
-
-  async getItemsByDomain(entityId: string, groupIds: string[], domain: string, limit: number): Promise<Array<{ id: string; type: string; domain: string | null; group_id: string | null; last_accessed_at: string | null }>> {
-    const placeholders = groupIds.map(() => '?').join(',');
-    const params: (string | number)[] = [];
-
-    let sql = `SELECT id, type, domain, group_id, last_accessed_at FROM l2_items WHERE domain = ? AND (`;
-    params.push(domain);
-
-    sql += `(visibility = 'private' AND owner_id = ?)`;
-    params.push(entityId);
-
-    if (groupIds.length > 0) {
-      sql += ` OR (visibility = 'group' AND group_id IN (${placeholders}))`;
-      params.push(...groupIds);
-    }
-
-    // Order: value by last_accessed_at, procedural by access_count DESC, interrupt by last_accessed_at DESC
-    if (domain === 'procedural') {
-      sql += `) ORDER BY access_count DESC, last_accessed_at DESC NULLS LAST LIMIT ?`;
-    } else {
-      sql += `) ORDER BY last_accessed_at DESC NULLS LAST LIMIT ?`;
-    }
-    params.push(limit);
-
-    return this.db.prepare(sql).all(...params) as Array<{ id: string; type: string; domain: string | null; group_id: string | null; last_accessed_at: string | null }>;
-  }
-
-  async getDomainItems(domain: string, limit: number): Promise<Array<{ id: string; type: string; domain: string | null }>> {
-    return this.db.prepare(
-      `SELECT id, type, domain FROM l2_items WHERE domain = ? ORDER BY last_accessed_at DESC NULLS LAST LIMIT ?`
-    ).all(domain, limit) as Array<{ id: string; type: string; domain: string | null }>;
-  }
-
-  async getExpiredItems(now: string): Promise<Array<{ id: string; domain: string | null }>> {
-    return this.db.prepare(
-      `SELECT id, domain FROM l2_items WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < ? AND (domain IS NULL OR domain != 'value')`
-    ).all(now) as Array<{ id: string; domain: string | null }>;
-  }
-
-  async getEvictableProceduralItems(cap: number): Promise<string[]> {
-    // Only evict private procedural items -- group items are governed by group culture policy
-    const rows = this.db.prepare(`
-      SELECT id FROM l2_items
-      WHERE domain = 'procedural' AND visibility = 'private'
-      ORDER BY access_count ASC, last_accessed_at ASC NULLS FIRST
-      LIMIT max(0, (SELECT COUNT(*) FROM l2_items WHERE domain = 'procedural' AND visibility = 'private') - ?)
-    `).all(cap) as Array<{ id: string }>;
-    return rows.map((r) => r.id);
-  }
-
-  async updateTtl(id: string, ttlExpiresAt: string): Promise<void> {
-    this.db.prepare('UPDATE l2_items SET ttl_expires_at = ? WHERE id = ?').run(ttlExpiresAt, id);
-  }
-
-  async getDomainCounts(): Promise<{ value: number; procedural: number; interrupt: number; unclassified: number }> {
-    const rows = this.db.prepare(
-      'SELECT domain, COUNT(*) as cnt FROM l2_items GROUP BY domain'
-    ).all() as Array<{ domain: string | null; cnt: number }>;
-
-    const counts = { value: 0, procedural: 0, interrupt: 0, unclassified: 0 };
-    for (const row of rows) {
-      if (row.domain === 'value') counts.value = row.cnt;
-      else if (row.domain === 'procedural') counts.procedural = row.cnt;
-      else if (row.domain === 'interrupt') counts.interrupt = row.cnt;
-      else counts.unclassified = row.cnt;
-    }
-    return counts;
   }
 
   // -- Canary --
@@ -981,7 +899,7 @@ export class SqliteStorageProvider implements StorageProvider {
   }
 
   /**
-   * Check if FTS5 tables are populated.
+   * Check if FTS5 tables are populated (for search path selection).
    */
   hasFtsData(): boolean {
     try {
@@ -992,73 +910,209 @@ export class SqliteStorageProvider implements StorageProvider {
     }
   }
 
-  /**
-   * Count rows in l2_items table.
-   */
-  itemCount(): number {
-    try {
-      const row = this.db.prepare('SELECT COUNT(*) as cnt FROM l2_items').get() as { cnt: number };
-      return row.cnt;
-    } catch {
-      return 0;
-    }
+  // -- OAuth 2.0 --
+
+  async getOAuthClient(clientId: string): Promise<OAuthClientRow | null> {
+    const row = this.db.prepare('SELECT * FROM oauth_clients WHERE client_id = ?').get(clientId) as OAuthClientRow | undefined;
+    return row || null;
   }
 
-  /**
-   * Count rows in l2_fts table.
-   */
-  ftsCount(): number {
-    try {
-      const row = this.db.prepare('SELECT COUNT(*) as cnt FROM l2_fts').get() as { cnt: number };
-      return row.cnt;
-    } catch {
-      return 0;
-    }
-  }
-
-  /**
-   * Count rows in embedding_cache table.
-   */
-  embeddingCacheCount(): number {
-    try {
-      const row = this.db.prepare('SELECT COUNT(*) as cnt FROM embedding_cache').get() as { cnt: number };
-      return row.cnt;
-    } catch {
-      return 0;
-    }
-  }
-
-  /**
-   * Count rows in l2_vec table.
-   */
-  vecCount(): number {
-    if (!this.vecLoaded) return 0;
-    try {
-      const row = this.db.prepare('SELECT COUNT(*) as cnt FROM l2_vec').get() as { cnt: number };
-      return row.cnt;
-    } catch {
-      return 0;
-    }
-  }
-
-  // -- Sync State (node bridge) --
-
-  getSyncTimestamp(groupId: string): string | null {
-    try {
-      const row = this.db.prepare('SELECT last_sync_at FROM sync_state WHERE group_id = ?').get(groupId) as { last_sync_at: string } | undefined;
-      return row?.last_sync_at ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  setSyncTimestamp(groupId: string, timestamp: string): void {
+  async createOAuthClient(client: Omit<OAuthClientRow, 'created_at' | 'updated_at'>): Promise<void> {
     this.db.prepare(`
-      INSERT INTO sync_state (group_id, last_sync_at, updated_at)
-      VALUES (?, ?, datetime('now'))
-      ON CONFLICT(group_id) DO UPDATE SET
-        last_sync_at = excluded.last_sync_at,
-        updated_at = datetime('now')
-    `).run(groupId, timestamp);
+      INSERT INTO oauth_clients (
+        client_id, client_secret_hash, client_id_issued_at, client_secret_expires_at,
+        redirect_uris, token_endpoint_auth_method, grant_types, response_types,
+        client_name, client_uri, logo_uri, scope, contacts, software_id, software_version, owner_user_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      client.client_id,
+      client.client_secret_hash || null,
+      client.client_id_issued_at,
+      client.client_secret_expires_at || null,
+      client.redirect_uris,
+      client.token_endpoint_auth_method || 'client_secret_post',
+      client.grant_types || '["authorization_code","refresh_token"]',
+      client.response_types || '["code"]',
+      client.client_name || null,
+      client.client_uri || null,
+      client.logo_uri || null,
+      client.scope || null,
+      client.contacts || null,
+      client.software_id || null,
+      client.software_version || null,
+      client.owner_user_id || null
+    );
   }
+
+  async deleteOAuthClient(clientId: string): Promise<boolean> {
+    const result = this.db.prepare('DELETE FROM oauth_clients WHERE client_id = ?').run(clientId);
+    return result.changes > 0;
+  }
+
+  async storeAuthorizationCode(codeHash: string, data: AuthorizationCodeRow): Promise<void> {
+    this.db.prepare(`
+      INSERT INTO oauth_authorization_codes (
+        code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at, resource
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      codeHash,
+      data.client_id,
+      data.user_id,
+      data.redirect_uri,
+      data.scope || null,
+      data.code_challenge,
+      data.code_challenge_method || 'S256',
+      data.expires_at,
+      data.resource || null
+    );
+  }
+
+  async getAuthorizationCode(codeHash: string): Promise<AuthorizationCodeRow | null> {
+    const row = this.db.prepare('SELECT * FROM oauth_authorization_codes WHERE code_hash = ?').get(codeHash) as AuthorizationCodeRow | undefined;
+    return row || null;
+  }
+
+  async deleteAuthorizationCode(codeHash: string): Promise<boolean> {
+    const result = this.db.prepare('DELETE FROM oauth_authorization_codes WHERE code_hash = ?').run(codeHash);
+    return result.changes > 0;
+  }
+
+  async cleanupExpiredAuthorizationCodes(): Promise<number> {
+    const now = Math.floor(Date.now() / 1000);
+    const result = this.db.prepare('DELETE FROM oauth_authorization_codes WHERE expires_at < ?').run(now);
+    return result.changes;
+  }
+
+  async storeAccessToken(tokenHash: string, data: AccessTokenRow): Promise<void> {
+    this.db.prepare(`
+      INSERT INTO oauth_access_tokens (token_hash, client_id, user_id, scope, expires_at, resource)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      tokenHash,
+      data.client_id,
+      data.user_id,
+      data.scope || null,
+      data.expires_at,
+      data.resource || null
+    );
+  }
+
+  async getAccessToken(tokenHash: string): Promise<AccessTokenRow | null> {
+    const row = this.db.prepare('SELECT * FROM oauth_access_tokens WHERE token_hash = ?').get(tokenHash) as AccessTokenRow | undefined;
+    return row || null;
+  }
+
+  async deleteAccessToken(tokenHash: string): Promise<boolean> {
+    const result = this.db.prepare('DELETE FROM oauth_access_tokens WHERE token_hash = ?').run(tokenHash);
+    return result.changes > 0;
+  }
+
+  async cleanupExpiredAccessTokens(): Promise<number> {
+    const now = Math.floor(Date.now() / 1000);
+    const result = this.db.prepare('DELETE FROM oauth_access_tokens WHERE expires_at < ?').run(now);
+    return result.changes;
+  }
+
+  async storeRefreshToken(tokenHash: string, data: RefreshTokenRow): Promise<void> {
+    this.db.prepare(`
+      INSERT INTO oauth_refresh_tokens (token_hash, client_id, user_id, scope, expires_at, resource)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      tokenHash,
+      data.client_id,
+      data.user_id,
+      data.scope || null,
+      data.expires_at || null,
+      data.resource || null
+    );
+  }
+
+  async getRefreshToken(tokenHash: string): Promise<RefreshTokenRow | null> {
+    const row = this.db.prepare('SELECT * FROM oauth_refresh_tokens WHERE token_hash = ?').get(tokenHash) as RefreshTokenRow | undefined;
+    return row || null;
+  }
+
+  async revokeRefreshToken(tokenHash: string): Promise<boolean> {
+    const result = this.db.prepare(`
+      UPDATE oauth_refresh_tokens SET revoked_at = datetime('now') WHERE token_hash = ? AND revoked_at IS NULL
+    `).run(tokenHash);
+    return result.changes > 0;
+  }
+
+  async deleteRefreshToken(tokenHash: string): Promise<boolean> {
+    const result = this.db.prepare('DELETE FROM oauth_refresh_tokens WHERE token_hash = ?').run(tokenHash);
+    return result.changes > 0;
+  }
+
+  async revokeAllUserTokens(userId: string): Promise<{ accessTokens: number; refreshTokens: number }> {
+    const accessResult = this.db.prepare('DELETE FROM oauth_access_tokens WHERE user_id = ?').run(userId);
+    const refreshResult = this.db.prepare(`
+      UPDATE oauth_refresh_tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL
+    `).run(userId);
+    return { accessTokens: accessResult.changes, refreshTokens: refreshResult.changes };
+  }
+
+  async revokeAllClientTokens(clientId: string): Promise<{ accessTokens: number; refreshTokens: number }> {
+    const accessResult = this.db.prepare('DELETE FROM oauth_access_tokens WHERE client_id = ?').run(clientId);
+    const refreshResult = this.db.prepare(`
+      UPDATE oauth_refresh_tokens SET revoked_at = datetime('now') WHERE client_id = ? AND revoked_at IS NULL
+    `).run(clientId);
+    return { accessTokens: accessResult.changes, refreshTokens: refreshResult.changes };
+  }
+}
+
+// OAuth type definitions
+export interface OAuthClientRow {
+  client_id: string;
+  client_secret_hash: string | null;
+  client_id_issued_at: number;
+  client_secret_expires_at: number | null;
+  redirect_uris: string;
+  token_endpoint_auth_method: string;
+  grant_types: string;
+  response_types: string;
+  client_name: string | null;
+  client_uri: string | null;
+  logo_uri: string | null;
+  scope: string | null;
+  contacts: string | null;
+  software_id: string | null;
+  software_version: string | null;
+  owner_user_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AuthorizationCodeRow {
+  code_hash?: string;
+  client_id: string;
+  user_id: string;
+  redirect_uri: string;
+  scope: string | null;
+  code_challenge: string;
+  code_challenge_method: string;
+  expires_at: number;
+  resource: string | null;
+  created_at?: string;
+}
+
+export interface AccessTokenRow {
+  token_hash?: string;
+  client_id: string;
+  user_id: string;
+  scope: string | null;
+  expires_at: number;
+  resource: string | null;
+  created_at?: string;
+}
+
+export interface RefreshTokenRow {
+  token_hash?: string;
+  client_id: string;
+  user_id: string;
+  scope: string | null;
+  expires_at: number | null;
+  resource: string | null;
+  revoked_at: string | null;
+  created_at?: string;
 }

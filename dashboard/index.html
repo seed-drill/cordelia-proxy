@@ -543,11 +543,16 @@
           <p class="card-description">Manage your API keys for CLI sync, export your data, or delete your profile.</p>
           <div class="account-actions">
             <div class="account-action">
-              <h3>API Key for CLI Sync</h3>
-              <p>Generate an API key to sync your local Cordelia with the cloud.</p>
+              <h3>API Key for MCP &amp; CLI</h3>
+              <p>Generate an API key to authenticate MCP connections and CLI sync.</p>
               <div id="api-key-display" style="display: none; margin-bottom: 1rem;">
                 <code id="api-key-value" style="display: block; background: #1a1a1a; color: #10b981; padding: 0.75rem; border-radius: 6px; font-size: 0.85rem; word-break: break-all; margin-bottom: 0.5rem;"></code>
                 <button class="btn btn-secondary" onclick="copyApiKey()" id="copy-btn">Copy to Clipboard</button>
+                <div id="mcp-config-display" style="margin-top: 1rem;">
+                  <p style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 0.5rem;">Add this to your <code>~/.claude.json</code> mcpServers:</p>
+                  <pre id="mcp-config-value" style="background: #1a1a1a; color: #60a5fa; padding: 0.75rem; border-radius: 6px; font-size: 0.75rem; overflow-x: auto; white-space: pre-wrap; word-break: break-all;"></pre>
+                  <button class="btn btn-secondary" onclick="copyMcpConfig()" id="copy-mcp-btn" style="margin-top: 0.5rem;">Copy MCP Config</button>
+                </div>
               </div>
               <button class="btn btn-primary" onclick="generateApiKey()" id="generate-key-btn">Generate New API Key</button>
             </div>

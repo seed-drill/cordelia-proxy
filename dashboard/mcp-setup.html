@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cordelia - MCP Setup</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <style>
+    .setup-container {
+      min-height: 80vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    .setup-card {
+      background: white;
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      padding: 2.5rem;
+      max-width: 600px;
+      width: 100%;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+
+    .setup-title {
+      color: var(--color-deep-green);
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
+      text-align: center;
+    }
+
+    .setup-subtitle {
+      color: var(--color-muted);
+      margin-bottom: 2rem;
+      text-align: center;
+    }
+
+    .step {
+      margin-bottom: 2rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 1px solid var(--color-border);
+    }
+
+    .step:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+    }
+
+    .step-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+
+    .step-number {
+      background: var(--color-deep-green);
+      color: white;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    .step-title {
+      font-size: 1.1rem;
+      color: var(--color-charcoal);
+    }
+
+    .step-content {
+      margin-left: 40px;
+    }
+
+    .code-block {
+      background: #1a1a1a;
+      color: #10b981;
+      padding: 1rem;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 0.85rem;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin-bottom: 0.75rem;
+    }
+
+    .code-block.json {
+      color: #60a5fa;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.625rem 1.25rem;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background-color 0.2s;
+      border: none;
+    }
+
+    .btn-primary {
+      background-color: var(--color-deep-green);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background-color: #1a4a3a;
+    }
+
+    .btn-primary:disabled {
+      background-color: #999;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background-color: #e5e5e5;
+      color: var(--color-charcoal);
+    }
+
+    .btn-secondary:hover {
+      background-color: #d5d5d5;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .success-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #d1fae5;
+      color: #065f46;
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      font-size: 0.9rem;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 2rem;
+      color: var(--color-muted);
+    }
+
+    .error-message {
+      background-color: #fee;
+      border: 1px solid #fcc;
+      color: #c00;
+      padding: 1rem;
+      border-radius: 6px;
+      margin-bottom: 1.5rem;
+    }
+
+    .footer-links {
+      margin-top: 2rem;
+      text-align: center;
+    }
+
+    .footer-links a {
+      color: var(--color-deep-green);
+      text-decoration: none;
+    }
+
+    .footer-links a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Cordelia</h1>
+    <div id="header-actions"></div>
+  </header>
+
+  <main class="setup-container">
+    <div class="setup-card">
+      <h2 class="setup-title">MCP Setup for Claude Code</h2>
+      <p class="setup-subtitle">Connect Claude Code to your Cordelia memory</p>
+
+      <div id="loading" class="loading">Loading...</div>
+      <div id="error" class="error-message" style="display: none;"></div>
+
+      <div id="setup-steps" style="display: none;">
+        <div class="step">
+          <div class="step-header">
+            <span class="step-number">1</span>
+            <span class="step-title">Generate API Key</span>
+          </div>
+          <div class="step-content">
+            <div id="api-key-status"></div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-header">
+            <span class="step-number">2</span>
+            <span class="step-title">Copy MCP Configuration</span>
+          </div>
+          <div class="step-content">
+            <p style="color: var(--color-muted); margin-bottom: 0.75rem; font-size: 0.9rem;">
+              Add this to your <code>~/.claude.json</code> file under <code>mcpServers</code>:
+            </p>
+            <pre id="mcp-config" class="code-block json"></pre>
+            <div class="button-row">
+              <button class="btn btn-secondary" onclick="copyConfig()" id="copy-btn">Copy Configuration</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-header">
+            <span class="step-number">3</span>
+            <span class="step-title">Restart Claude Code</span>
+          </div>
+          <div class="step-content">
+            <p style="color: var(--color-muted); font-size: 0.9rem;">
+              After updating your config, restart Claude Code to connect to Cordelia.
+              You can verify the connection with <code>/mcp list</code>.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer-links">
+        <a href="/">Go to Dashboard</a>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <p>Project Cordelia - Seed Drill</p>
+  </footer>
+
+  <script>
+    const API_BASE = '';
+    let currentUserId = null;
+    let currentApiKey = null;
+
+    async function checkAuth() {
+      const response = await fetch(`${API_BASE}/auth/status`);
+      return await response.json();
+    }
+
+    async function generateApiKey(userId) {
+      const response = await fetch(`${API_BASE}/api/profile/${encodeURIComponent(userId)}/api-key`, {
+        method: 'POST',
+      });
+      return await response.json();
+    }
+
+    async function loadUserContext(userId) {
+      const response = await fetch(`${API_BASE}/api/hot/${encodeURIComponent(userId)}`);
+      if (!response.ok) return null;
+      return await response.json();
+    }
+
+    function showMcpConfig(apiKey) {
+      const config = {
+        cordelia: {
+          url: `${window.location.origin}/mcp/sse`,
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+          },
+        },
+      };
+      document.getElementById('mcp-config').textContent = JSON.stringify(config, null, 2);
+    }
+
+    function copyConfig() {
+      const config = document.getElementById('mcp-config').textContent;
+      navigator.clipboard.writeText(config).then(() => {
+        const btn = document.getElementById('copy-btn');
+        btn.textContent = 'Copied!';
+        setTimeout(() => {
+          btn.textContent = 'Copy Configuration';
+        }, 2000);
+      }).catch(err => {
+        console.error('Failed to copy:', err);
+        alert('Failed to copy to clipboard');
+      });
+    }
+
+    async function init() {
+      const loadingEl = document.getElementById('loading');
+      const errorEl = document.getElementById('error');
+      const stepsEl = document.getElementById('setup-steps');
+      const apiKeyStatusEl = document.getElementById('api-key-status');
+
+      try {
+        // Check auth
+        const auth = await checkAuth();
+        if (!auth.authenticated) {
+          window.location.href = '/login.html?redirect=mcp';
+          return;
+        }
+
+        currentUserId = auth.cordelia_user;
+
+        if (!currentUserId) {
+          // User doesn't have a Cordelia profile yet
+          window.location.href = '/genesis.html';
+          return;
+        }
+
+        // Check if user already has an API key
+        const context = await loadUserContext(currentUserId);
+        currentApiKey = context?.identity?.api_key;
+
+        loadingEl.style.display = 'none';
+        stepsEl.style.display = 'block';
+
+        if (currentApiKey) {
+          // Already has an API key
+          apiKeyStatusEl.innerHTML = `
+            <div class="success-badge">API Key Ready</div>
+            <p style="color: var(--color-muted); margin-top: 0.75rem; font-size: 0.9rem;">
+              Your API key is already configured.
+            </p>
+            <div class="button-row" style="margin-top: 0.75rem;">
+              <button class="btn btn-secondary" onclick="regenerateKey()">Regenerate Key</button>
+            </div>
+          `;
+          showMcpConfig(currentApiKey);
+        } else {
+          // Need to generate an API key
+          apiKeyStatusEl.innerHTML = `
+            <p style="color: var(--color-muted); margin-bottom: 0.75rem; font-size: 0.9rem;">
+              You need an API key to authenticate MCP connections.
+            </p>
+            <button class="btn btn-primary" onclick="generateKey()" id="generate-btn">Generate API Key</button>
+          `;
+          document.getElementById('mcp-config').textContent = '// Generate an API key first';
+        }
+
+      } catch (error) {
+        console.error('Init error:', error);
+        loadingEl.style.display = 'none';
+        errorEl.textContent = 'Failed to load: ' + error.message;
+        errorEl.style.display = 'block';
+      }
+    }
+
+    async function generateKey() {
+      const btn = document.getElementById('generate-btn');
+      btn.disabled = true;
+      btn.textContent = 'Generating...';
+
+      try {
+        const result = await generateApiKey(currentUserId);
+        if (result.success && result.api_key) {
+          currentApiKey = result.api_key;
+          document.getElementById('api-key-status').innerHTML = `
+            <div class="success-badge">API Key Generated</div>
+            <p style="color: var(--color-muted); margin-top: 0.75rem; font-size: 0.9rem;">
+              Your API key has been created and saved.
+            </p>
+            <div class="button-row" style="margin-top: 0.75rem;">
+              <button class="btn btn-secondary" onclick="regenerateKey()">Regenerate Key</button>
+            </div>
+          `;
+          showMcpConfig(currentApiKey);
+        } else {
+          alert('Failed to generate API key: ' + (result.error || 'Unknown error'));
+          btn.disabled = false;
+          btn.textContent = 'Generate API Key';
+        }
+      } catch (error) {
+        alert('Failed to generate API key: ' + error.message);
+        btn.disabled = false;
+        btn.textContent = 'Generate API Key';
+      }
+    }
+
+    async function regenerateKey() {
+      if (!confirm('This will invalidate your current API key. Continue?')) {
+        return;
+      }
+
+      try {
+        const result = await generateApiKey(currentUserId);
+        if (result.success && result.api_key) {
+          currentApiKey = result.api_key;
+          showMcpConfig(currentApiKey);
+          alert('API key regenerated. Update your Claude Code config with the new key.');
+        } else {
+          alert('Failed to regenerate API key: ' + (result.error || 'Unknown error'));
+        }
+      } catch (error) {
+        alert('Failed to regenerate API key: ' + error.message);
+      }
+    }
+
+    // Clear any redirect intent
+    localStorage.removeItem('cordelia_login_redirect');
+
+    init();
+  </script>
+</body>
+</html>

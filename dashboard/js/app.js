@@ -229,6 +229,17 @@ async function generateApiKey() {
       document.getElementById('api-key-value').textContent = result.api_key;
       document.getElementById('api-key-display').style.display = 'block';
       generateBtn.textContent = 'Regenerate API Key';
+
+      // Generate MCP config
+      const mcpConfig = {
+        cordelia: {
+          url: `${window.location.origin}/mcp/sse`,
+          headers: {
+            Authorization: `Bearer ${result.api_key}`,
+          },
+        },
+      };
+      document.getElementById('mcp-config-value').textContent = JSON.stringify(mcpConfig, null, 2);
     } else {
       alert('Failed to generate API key: ' + (result.error || 'Unknown error'));
       generateBtn.textContent = 'Generate New API Key';
@@ -259,6 +270,23 @@ function copyApiKey() {
   });
 }
 
+/**
+ * Copy MCP config to clipboard
+ */
+function copyMcpConfig() {
+  const mcpConfig = document.getElementById('mcp-config-value').textContent;
+  navigator.clipboard.writeText(mcpConfig).then(() => {
+    const copyBtn = document.getElementById('copy-mcp-btn');
+    copyBtn.textContent = 'Copied!';
+    setTimeout(() => {
+      copyBtn.textContent = 'Copy MCP Config';
+    }, 2000);
+  }).catch(err => {
+    console.error('Failed to copy:', err);
+    alert('Failed to copy to clipboard');
+  });
+}
+
 // Make profile functions available globally
 window.exportProfile = exportProfile;
 window.showDeleteConfirm = showDeleteConfirm;
@@ -266,6 +294,7 @@ window.hideDeleteConfirm = hideDeleteConfirm;
 window.confirmDelete = confirmDelete;
 window.generateApiKey = generateApiKey;
 window.copyApiKey = copyApiKey;
+window.copyMcpConfig = copyMcpConfig;
 
 /**
  * Check authentication status
@@ -654,6 +683,21 @@ async function loadUsers() {
 }
 
 /**
+ * Check for post-login redirect (from OAuth flow)
+ */
+function checkPostLoginRedirect() {
+  const redirect = localStorage.getItem('cordelia_login_redirect');
+  if (redirect) {
+    localStorage.removeItem('cordelia_login_redirect');
+    if (redirect === 'mcp') {
+      window.location.href = '/mcp-setup.html';
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Initialize dashboard
  */
 async function init() {
@@ -664,6 +708,11 @@ async function init() {
   updateHeaderUI(auth);
 
   if (auth?.authenticated) {
+    // Check for post-login redirect (e.g., from MCP auth flow)
+    if (checkPostLoginRedirect()) {
+      return;
+    }
+
     // Check if user has a Cordelia profile
     if (!auth.cordelia_user) {
       // No profile yet - redirect to genesis mode

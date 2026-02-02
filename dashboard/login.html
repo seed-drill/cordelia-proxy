@@ -269,15 +269,42 @@
   <script>
     const API_BASE = '';
 
+    // Get redirect parameter
+    function getRedirectParam() {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('redirect');
+    }
+
+    // Store redirect intent for after OAuth
+    function storeRedirectIntent() {
+      const redirect = getRedirectParam();
+      if (redirect) {
+        localStorage.setItem('cordelia_login_redirect', redirect);
+      }
+    }
+
+    // Get post-login redirect URL
+    function getPostLoginUrl() {
+      const redirect = localStorage.getItem('cordelia_login_redirect');
+      localStorage.removeItem('cordelia_login_redirect');
+      if (redirect === 'mcp') {
+        return '/mcp-setup.html';
+      }
+      return '/';
+    }
+
     // Check auth status and configure login options
     async function init() {
+      // Store redirect intent before any redirects
+      storeRedirectIntent();
+
       try {
         const response = await fetch(`${API_BASE}/auth/status`);
         const data = await response.json();
 
-        // If already authenticated, redirect to home
+        // If already authenticated, redirect appropriately
         if (data.authenticated) {
-          window.location.href = '/';
+          window.location.href = getPostLoginUrl();
           return;
         }
 
@@ -309,6 +336,18 @@
           noAuthMessage.style.display = 'block';
           skipLink.style.display = 'block';
         }
+
+        // Show MCP context message if redirected from MCP
+        if (getRedirectParam() === 'mcp') {
+          const infoEl = document.querySelector('.login-info');
+          infoEl.innerHTML = `
+            <h4>MCP Authentication Required</h4>
+            <p>
+              Sign in to get your API key for connecting Claude Code to Cordelia.
+              After login, you'll see your MCP configuration to copy.
+            </p>
+          `;
+        }
       } catch (error) {
         console.error('Failed to check auth status:', error);
         document.getElementById('skip-link').style.display = 'block';
@@ -338,7 +377,7 @@
         const data = await response.json();
 
         if (response.ok && data.success) {
-          window.location.href = '/';
+          window.location.href = getPostLoginUrl();
         } else {
           errorEl.textContent = data.error || 'Login failed';
           errorEl.style.display = 'block';

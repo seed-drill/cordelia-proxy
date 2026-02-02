@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cordelia - Authorize Application</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <style>
+    .consent-container {
+      min-height: 80vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .consent-card {
+      background: white;
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      padding: 3rem;
+      max-width: 480px;
+      width: 100%;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+
+    .consent-header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    .consent-logo {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+    }
+
+    .consent-title {
+      color: var(--color-deep-green);
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .consent-subtitle {
+      color: var(--color-muted);
+    }
+
+    .client-info {
+      background-color: #f8f9fa;
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 1.25rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .client-name {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--color-charcoal);
+      margin-bottom: 0.25rem;
+    }
+
+    .client-id {
+      font-size: 0.85rem;
+      color: var(--color-muted);
+      font-family: monospace;
+    }
+
+    .scope-section {
+      margin-bottom: 1.5rem;
+    }
+
+    .scope-section h3 {
+      font-size: 1rem;
+      color: var(--color-charcoal);
+      margin-bottom: 0.75rem;
+    }
+
+    .scope-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+
+    .scope-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      padding: 0.75rem;
+      background-color: #f8f9fa;
+      border-radius: 6px;
+      margin-bottom: 0.5rem;
+    }
+
+    .scope-icon {
+      font-size: 1.25rem;
+      flex-shrink: 0;
+    }
+
+    .scope-details h4 {
+      font-size: 0.95rem;
+      color: var(--color-charcoal);
+      margin-bottom: 0.25rem;
+    }
+
+    .scope-details p {
+      font-size: 0.85rem;
+      color: var(--color-muted);
+      margin: 0;
+    }
+
+    .user-section {
+      background-color: #e8f5e9;
+      border: 1px solid #c8e6c9;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .user-section p {
+      margin: 0;
+      font-size: 0.9rem;
+      color: #2e7d32;
+    }
+
+    .user-section strong {
+      font-weight: 600;
+    }
+
+    .action-buttons {
+      display: flex;
+      gap: 1rem;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 0.875rem 1.5rem;
+      border-radius: 6px;
+      font-size: 1rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-align: center;
+      border: none;
+    }
+
+    .btn-primary {
+      background-color: var(--color-deep-green);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background-color: #1a4a3a;
+    }
+
+    .btn-secondary {
+      background-color: white;
+      color: var(--color-charcoal);
+      border: 1px solid var(--color-border);
+    }
+
+    .btn-secondary:hover {
+      background-color: #f5f5f5;
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .consent-footer {
+      margin-top: 1.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--color-border);
+      font-size: 0.85rem;
+      color: var(--color-muted);
+      text-align: center;
+    }
+
+    .error-message {
+      background-color: #fee;
+      border: 1px solid #fcc;
+      color: #c00;
+      padding: 1rem;
+      border-radius: 6px;
+      margin-bottom: 1.5rem;
+    }
+
+    .login-prompt {
+      text-align: center;
+      padding: 2rem;
+    }
+
+    .login-prompt p {
+      margin-bottom: 1rem;
+      color: var(--color-muted);
+    }
+
+    .login-prompt .btn {
+      display: inline-block;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Cordelia</h1>
+    <div></div>
+  </header>
+
+  <main class="consent-container">
+    <div class="consent-card">
+      <div class="consent-header">
+        <div class="consent-logo">🔐</div>
+        <h2 class="consent-title">Authorize Application</h2>
+        <p class="consent-subtitle">An application wants to access your Cordelia memory</p>
+      </div>
+
+      <div id="error-message" class="error-message" style="display: none;"></div>
+
+      <!-- Login prompt (shown if not authenticated) -->
+      <div id="login-prompt" class="login-prompt" style="display: none;">
+        <p>You need to sign in to authorize this application.</p>
+        <a href="/login.html" class="btn btn-primary" id="login-link">Sign In</a>
+      </div>
+
+      <!-- Consent form (shown if authenticated) -->
+      <div id="consent-form" style="display: none;">
+        <div class="client-info">
+          <div class="client-name" id="client-name">Unknown Application</div>
+          <div class="client-id" id="client-id"></div>
+        </div>
+
+        <div class="user-section">
+          <p>Signed in as <strong id="user-name"></strong></p>
+        </div>
+
+        <div class="scope-section">
+          <h3>This application will be able to:</h3>
+          <ul class="scope-list" id="scope-list">
+            <!-- Populated by JavaScript -->
+          </ul>
+        </div>
+
+        <div class="action-buttons">
+          <button type="button" class="btn btn-secondary" id="deny-btn">Deny</button>
+          <button type="button" class="btn btn-primary" id="authorize-btn">Authorize</button>
+        </div>
+
+        <div class="consent-footer">
+          <p>By authorizing, you allow this application to access your memory according to the permissions above.</p>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <p>Project Cordelia - Seed Drill</p>
+  </footer>
+
+  <script>
+    const API_BASE = '';
+
+    // Scope descriptions
+    const SCOPE_INFO = {
+      'memory_read': {
+        icon: '📖',
+        title: 'Read your memory',
+        description: 'Access your stored identity, preferences, and context'
+      },
+      'memory_write': {
+        icon: '✏️',
+        title: 'Write to your memory',
+        description: 'Update your stored information and preferences'
+      },
+      'memory_search': {
+        icon: '🔍',
+        title: 'Search your memory',
+        description: 'Search through your entities, sessions, and learnings'
+      },
+      'mcp': {
+        icon: '🧠',
+        title: 'Full MCP access',
+        description: 'Complete access to all Cordelia memory features via MCP'
+      }
+    };
+
+    // Get URL parameters
+    function getParams() {
+      const params = new URLSearchParams(window.location.search);
+      return {
+        clientId: params.get('client_id'),
+        clientName: params.get('client_name'),
+        redirectUri: params.get('redirect_uri'),
+        state: params.get('state'),
+        scope: params.get('scope'),
+        codeChallenge: params.get('code_challenge'),
+        resource: params.get('resource')
+      };
+    }
+
+    // Populate scope list
+    function populateScopes(scopeString) {
+      const scopeList = document.getElementById('scope-list');
+      const scopes = scopeString ? scopeString.split(' ').filter(Boolean) : ['mcp'];
+
+      // If 'mcp' scope is present, just show that (it includes all)
+      if (scopes.includes('mcp')) {
+        const info = SCOPE_INFO['mcp'];
+        scopeList.innerHTML = `
+          <li class="scope-item">
+            <span class="scope-icon">${info.icon}</span>
+            <div class="scope-details">
+              <h4>${info.title}</h4>
+              <p>${info.description}</p>
+            </div>
+          </li>
+        `;
+        return;
+      }
+
+      // Otherwise show individual scopes
+      scopeList.innerHTML = scopes.map(scope => {
+        const info = SCOPE_INFO[scope] || {
+          icon: '🔑',
+          title: scope,
+          description: 'Access permission'
+        };
+        return `
+          <li class="scope-item">
+            <span class="scope-icon">${info.icon}</span>
+            <div class="scope-details">
+              <h4>${info.title}</h4>
+              <p>${info.description}</p>
+            </div>
+          </li>
+        `;
+      }).join('');
+    }
+
+    // Handle authorization decision
+    async function handleDecision(approved) {
+      const params = getParams();
+      const authorizeBtn = document.getElementById('authorize-btn');
+      const denyBtn = document.getElementById('deny-btn');
+
+      authorizeBtn.disabled = true;
+      denyBtn.disabled = true;
+      authorizeBtn.textContent = approved ? 'Authorizing...' : 'Authorize';
+      denyBtn.textContent = approved ? 'Deny' : 'Denying...';
+
+      try {
+        const response = await fetch(`${API_BASE}/oauth/consent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            approved,
+            client_id: params.clientId,
+            state: params.state,
+            code_challenge: params.codeChallenge,
+            redirect_uri: params.redirectUri,
+            scope: params.scope,
+            resource: params.resource
+          })
+        });
+
+        const data = await response.json();
+
+        if (data.redirect_url) {
+          window.location.href = data.redirect_url;
+        } else if (data.error) {
+          showError(data.error);
+          authorizeBtn.disabled = false;
+          denyBtn.disabled = false;
+          authorizeBtn.textContent = 'Authorize';
+          denyBtn.textContent = 'Deny';
+        }
+      } catch (error) {
+        showError('Connection error. Please try again.');
+        authorizeBtn.disabled = false;
+        denyBtn.disabled = false;
+        authorizeBtn.textContent = 'Authorize';
+        denyBtn.textContent = 'Deny';
+      }
+    }
+
+    // Show error message
+    function showError(message) {
+      const errorEl = document.getElementById('error-message');
+      errorEl.textContent = message;
+      errorEl.style.display = 'block';
+    }
+
+    // Initialize
+    async function init() {
+      const params = getParams();
+
+      if (!params.clientId || !params.redirectUri || !params.codeChallenge) {
+        showError('Invalid authorization request. Missing required parameters.');
+        return;
+      }
+
+      // Check auth status
+      try {
+        const response = await fetch(`${API_BASE}/auth/status`);
+        const data = await response.json();
+
+        if (!data.authenticated) {
+          // Show login prompt, preserve OAuth params
+          document.getElementById('login-prompt').style.display = 'block';
+          const loginLink = document.getElementById('login-link');
+          loginLink.href = `/login.html?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+          return;
+        }
+
+        // User is authenticated, show consent form
+        document.getElementById('consent-form').style.display = 'block';
+        document.getElementById('client-name').textContent = params.clientName || 'Unknown Application';
+        document.getElementById('client-id').textContent = params.clientId;
+        document.getElementById('user-name').textContent = data.cordelia_user || data.username || 'Unknown';
+
+        populateScopes(params.scope);
+
+        // Set up button handlers
+        document.getElementById('authorize-btn').addEventListener('click', () => handleDecision(true));
+        document.getElementById('deny-btn').addEventListener('click', () => handleDecision(false));
+
+      } catch (error) {
+        showError('Failed to check authentication status.');
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

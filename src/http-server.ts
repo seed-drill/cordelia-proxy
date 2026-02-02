@@ -39,10 +39,17 @@ import {
 import { initStorageProvider, getStorageProvider } from './storage.js';
 import { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { registerCordeliaTools } from './mcp-tools.js';
-import { randomUUID } from 'crypto';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
+import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
+import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import { CordeliaOAuthProvider } from './oauth-provider.js';
+import { SqliteStorageProvider } from './storage-sqlite.js';
 
 const PORT = parseInt(process.env.CORDELIA_HTTP_PORT || '3847', 10);
 const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT || path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory');
@@ -71,9 +78,6 @@ const _API_KEY = process.env.CORDELIA_API_KEY;
 // Core node API (optional, for P2P network status)
 const CORDELIA_CORE_API = process.env.CORDELIA_CORE_API;
 
-// --local mode: bind to localhost only, disable auth requirements
-const LOCAL_MODE = process.argv.includes('--local');
-
 // Determine base URL for OAuth callback
 // Priority: CORDELIA_BASE_URL > Fly.io detection > localhost
 function getBaseUrl(): string {
@@ -100,6 +104,9 @@ interface Session {
 
 // Simple in-memory session store (for production, use Redis or similar)
 const sessions = new Map<string, Session>();
+
+// OAuth provider (initialized on server start)
+let oauthProvider: CordeliaOAuthProvider | null = null;
 
 const app = express();
 app.use(cors());
@@ -186,6 +193,49 @@ function getSession(req: Request): Session | null {
   }
 
   return session;
+}
+
+/**
+ * @deprecated Use OAuth 2.0 authentication instead.
+ * Validate legacy API key from Authorization header and return the user ID.
+ * Accepts: "Authorization: Bearer ck_xxx" or "X-API-Key: ck_xxx"
+ *
+ * This function is kept for backward compatibility during migration.
+ * It will be removed in a future version.
+ */
+async function validateApiKey(req: Request): Promise<string | null> {
+  // Check Authorization header first (Bearer token)
+  const authHeader = req.headers.authorization;
+  let apiKey: string | undefined;
+
+  if (authHeader?.startsWith('Bearer ')) {
+    apiKey = authHeader.slice(7);
+  } else {
+    // Fall back to X-API-Key header
+    apiKey = req.headers['x-api-key'] as string | undefined;
+  }
+
+  // Only validate legacy API keys (ck_ prefix)
+  if (!apiKey || !apiKey.startsWith('ck_')) {
+    return null;
+  }
+
+  console.warn('DEPRECATED: Legacy API key authentication used. Please migrate to OAuth 2.0.');
+
+  // Search all users for matching API key
+  const users = await listUsers();
+  for (const userId of users) {
+    try {
+      const context = await loadHotContext(userId);
+      if (context?.identity?.api_key === apiKey) {
+        return userId;
+      }
+    } catch {
+      // Skip users we can't load
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -398,6 +448,73 @@ app.post('/auth/logout', (req: Request, res: Response) => {
 });
 
 // =============================================================================
+// OAuth 2.0 Consent Endpoints
+// =============================================================================
+
+/**
+ * GET /oauth/consent - Serve the consent page
+ * Redirected here by the OAuth authorize flow
+ */
+app.get('/oauth/consent', (_req: Request, res: Response) => {
+  res.sendFile(path.join(DASHBOARD_ROOT, 'consent.html'));
+});
+
+/**
+ * POST /oauth/consent - Process user consent decision
+ * Called from the consent.html page after user approves/denies
+ */
+app.post('/oauth/consent', async (req: Request, res: Response) => {
+  const session = getSession(req);
+
+  if (!session || !session.cordelia_user) {
+    res.status(401).json({ error: 'Must be logged in to authorize applications' });
+    return;
+  }
+
+  if (!oauthProvider) {
+    res.status(503).json({ error: 'OAuth not initialized' });
+    return;
+  }
+
+  const { approved, client_id, state, redirect_uri } = req.body;
+
+  if (!state) {
+    res.status(400).json({ error: 'Missing state parameter' });
+    return;
+  }
+
+  try {
+    const result = await oauthProvider.completeAuthorization(
+      state,
+      session.cordelia_user,
+      approved === true
+    );
+
+    if (result.error) {
+      // Build error redirect URL
+      const redirectUrl = new URL(result.redirectUri || redirect_uri);
+      redirectUrl.searchParams.set('error', result.error);
+      if (result.state) {
+        redirectUrl.searchParams.set('state', result.state);
+      }
+      res.json({ redirect_url: redirectUrl.toString() });
+      return;
+    }
+
+    // Build success redirect URL
+    const redirectUrl = new URL(result.redirectUri!);
+    redirectUrl.searchParams.set('code', result.code!);
+    if (result.state) {
+      redirectUrl.searchParams.set('state', result.state);
+    }
+    res.json({ redirect_url: redirectUrl.toString() });
+  } catch (error) {
+    console.error('OAuth consent error:', error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// =============================================================================
 // API Routes
 // =============================================================================
 
@@ -453,15 +570,13 @@ app.get('/api/core/status', async (_req: Request, res: Response) => {
   }
 
   try {
-    // Read the bearer token: env var first, then file fallback
+    // Read the bearer token from core's config directory
     const fs = await import('fs/promises');
-    let bearerToken = process.env.CORDELIA_NODE_TOKEN || '';
-    if (!bearerToken) {
-      try {
-        bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
-      } catch {
-        // Token file may not exist yet
-      }
+    let bearerToken = '';
+    try {
+      bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
+    } catch {
+      // Token file may not exist yet
     }
 
     const response = await fetch(`${CORDELIA_CORE_API}/api/v1/status`, {
@@ -520,15 +635,13 @@ app.get('/api/peers', async (_req: Request, res: Response) => {
   }
 
   try {
-    // Read the bearer token: env var first, then file fallback
+    // Read the bearer token from core's config directory
     const fs = await import('fs/promises');
-    let bearerToken = process.env.CORDELIA_NODE_TOKEN || '';
-    if (!bearerToken) {
-      try {
-        bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
-      } catch {
-        // Token file may not exist yet
-      }
+    let bearerToken = '';
+    try {
+      bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
+    } catch {
+      // Token file may not exist yet
     }
 
     const response = await fetch(`${CORDELIA_CORE_API}/api/v1/peers`, {
@@ -851,10 +964,14 @@ app.post('/api/signup', async (req: Request, res: Response) => {
 // =============================================================================
 
 /**
- * POST /api/profile/:userId/api-key - Generate or regenerate API key for CLI uploads
+ * @deprecated Use OAuth 2.0 dynamic client registration instead.
+ * POST /api/profile/:userId/api-key - Generate or regenerate legacy API key
  * Requires session auth (must be logged in as this user)
+ *
+ * This endpoint is deprecated. Use POST /register for OAuth client registration.
  */
 app.post('/api/profile/:userId/api-key', async (req: Request, res: Response) => {
+  console.warn('DEPRECATED: /api/profile/:userId/api-key endpoint called. Use OAuth 2.0 instead.');
   const session = getSession(req);
   const userId = req.params.userId;
 
@@ -1099,6 +1216,456 @@ app.get('/api/admin/users', async (req: Request, res: Response) => {
   }
 });
 
+// =============================================================================
+// MCP SSE Transport
+// =============================================================================
+
+// Store active SSE transports by session ID, along with authenticated user
+interface McpSession {
+  transport: SSEServerTransport;
+  userId: string;
+}
+const mcpTransports = new Map<string, McpSession>();
+
+/**
+ * Create an MCP server with all Cordelia tools registered.
+ * Each SSE connection gets its own server instance.
+ */
+function createMcpServer(): McpServer {
+  const server = new McpServer(
+    { name: 'cordelia', version: '0.4.0' },
+    { capabilities: { tools: {}, resources: {} } }
+  );
+
+  // List available tools
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [
+      {
+        name: 'memory_read_hot',
+        description: 'Read L1 hot context for a user. Returns dense structured memory including identity, active state, preferences, and delegation rules.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            user_id: { type: 'string', description: 'User identifier (e.g., "russell")' },
+          },
+          required: ['user_id'],
+        },
+      },
+      {
+        name: 'memory_write_hot',
+        description: 'Write to L1 hot context for a user. Use patch for partial updates, replace for full replacement.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            user_id: { type: 'string', description: 'User identifier' },
+            operation: { type: 'string', enum: ['patch', 'replace'] },
+            data: { type: 'object', description: 'Data to write/merge' },
+            expected_updated_at: { type: 'string', description: 'Optional optimistic lock' },
+          },
+          required: ['user_id', 'operation', 'data'],
+        },
+      },
+      {
+        name: 'memory_status',
+        description: 'Get memory system status and available users.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'memory_search',
+        description: 'Search L2 warm index by keyword, type, and/or tags.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Search query' },
+            type: { type: 'string', enum: ['entity', 'session', 'learning'] },
+            tags: { type: 'array', items: { type: 'string' } },
+            limit: { type: 'number', description: 'Max results (default: 20)' },
+          },
+        },
+      },
+      {
+        name: 'memory_read_warm',
+        description: 'Read a specific L2 warm item by ID.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Item ID' },
+          },
+          required: ['id'],
+        },
+      },
+      {
+        name: 'memory_write_warm',
+        description: 'Create or update an L2 warm item (entity, session, or learning).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', enum: ['entity', 'session', 'learning'] },
+            data: { type: 'object', description: 'Item data' },
+          },
+          required: ['type', 'data'],
+        },
+      },
+    ],
+  }));
+
+  // List available resources
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    try {
+      const storage = getStorageProvider();
+      const users = await storage.listL1Users();
+      return {
+        resources: users.map((userId) => ({
+          uri: `cordelia://hot/${userId}`,
+          name: `Hot context: ${userId}`,
+          mimeType: 'application/json',
+        })),
+      };
+    } catch {
+      return { resources: [] };
+    }
+  });
+
+  // Read resource
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const uri = request.params.uri;
+    const match = uri.match(/^cordelia:\/\/hot\/(.+)$/);
+    if (!match) throw new Error(`Unknown resource URI: ${uri}`);
+
+    const userId = match[1];
+    const context = await loadHotContext(userId);
+    if (!context) throw new Error(`No hot context found for user: ${userId}`);
+
+    return {
+      contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(context, null, 2) }],
+    };
+  });
+
+  // Handle tool calls
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+
+    switch (name) {
+      case 'memory_read_hot': {
+        const userId = (args as { user_id: string }).user_id;
+        const context = await loadHotContext(userId);
+
+        if (!context) {
+          let knownUsers: string[] = [];
+          try {
+            const storage = getStorageProvider();
+            knownUsers = await storage.listL1Users();
+          } catch { /* ignore */ }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                error: 'user_not_found',
+                user_id: userId,
+                known_users: knownUsers,
+              }),
+            }],
+          };
+        }
+
+        return { content: [{ type: 'text', text: JSON.stringify(context) }] };
+      }
+
+      case 'memory_write_hot': {
+        const { user_id, operation, data, expected_updated_at } = args as {
+          user_id: string;
+          operation: 'patch' | 'replace';
+          data: Record<string, unknown>;
+          expected_updated_at?: string;
+        };
+
+        // Load current, merge/replace, validate, write
+        const current = await loadHotContext(user_id);
+        if (!current) {
+          return { content: [{ type: 'text', text: JSON.stringify({ error: 'user_not_found' }) }] };
+        }
+
+        if (expected_updated_at && current.updated_at !== expected_updated_at) {
+          return { content: [{ type: 'text', text: JSON.stringify({ error: 'conflict', current_updated_at: current.updated_at }) }] };
+        }
+
+        const newUpdatedAt = new Date().toISOString();
+        let newContext: L1HotContext;
+
+        if (operation === 'replace') {
+          const merged = { ...data, version: 1, updated_at: newUpdatedAt };
+          try {
+            newContext = L1HotContextSchema.parse(merged);
+          } catch (e) {
+            return { content: [{ type: 'text', text: JSON.stringify({ error: `validation_failed: ${(e as Error).message}` }) }] };
+          }
+        } else {
+          // Patch - deep merge
+          const merged = deepMerge(current as unknown as Record<string, unknown>, data);
+          merged.updated_at = newUpdatedAt;
+          try {
+            newContext = L1HotContextSchema.parse(merged);
+          } catch (e) {
+            return { content: [{ type: 'text', text: JSON.stringify({ error: `validation_failed: ${(e as Error).message}` }) }] };
+          }
+        }
+
+        // Write to storage
+        const cryptoProvider = getDefaultCryptoProvider();
+        let fileContent: string;
+        if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
+          const plaintext = Buffer.from(JSON.stringify(newContext, null, 2), 'utf-8');
+          const encrypted = await cryptoProvider.encrypt(plaintext);
+          fileContent = JSON.stringify(encrypted, null, 2);
+        } else {
+          fileContent = JSON.stringify(newContext, null, 2);
+        }
+
+        const storage = getStorageProvider();
+        await storage.writeL1(user_id, Buffer.from(fileContent, 'utf-8'));
+
+        return { content: [{ type: 'text', text: JSON.stringify({ success: true, updated_at: newUpdatedAt }) }] };
+      }
+
+      case 'memory_status': {
+        let users: string[] = [];
+        try {
+          const storage = getStorageProvider();
+          users = await storage.listL1Users();
+        } catch { /* ignore */ }
+
+        const l2Index = await l2.loadIndex();
+        const cryptoProvider = getDefaultCryptoProvider();
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              status: 'ok',
+              version: '0.4.0',
+              layers: {
+                L1_hot: { users },
+                L2_warm: {
+                  entries: l2Index.entries.length,
+                  entities: l2Index.entries.filter((e) => e.type === 'entity').length,
+                  sessions: l2Index.entries.filter((e) => e.type === 'session').length,
+                  learnings: l2Index.entries.filter((e) => e.type === 'learning').length,
+                },
+              },
+              encryption: { provider: cryptoProvider.name, unlocked: cryptoProvider.isUnlocked() },
+            }),
+          }],
+        };
+      }
+
+      case 'memory_search': {
+        const { query, type, tags, limit } = args as {
+          query?: string;
+          type?: 'entity' | 'session' | 'learning';
+          tags?: string[];
+          limit?: number;
+        };
+
+        const results = await l2.search({ query, type, tags, limit });
+        return { content: [{ type: 'text', text: JSON.stringify({ results, count: results.length }) }] };
+      }
+
+      case 'memory_read_warm': {
+        const { id } = args as { id: string };
+        const item = await l2.readItem(id);
+
+        if (!item) {
+          return { content: [{ type: 'text', text: JSON.stringify({ error: 'not_found', id }) }] };
+        }
+
+        return { content: [{ type: 'text', text: JSON.stringify(item) }] };
+      }
+
+      case 'memory_write_warm': {
+        const { type, data } = args as {
+          type: 'entity' | 'session' | 'learning';
+          data: Record<string, unknown>;
+        };
+
+        const result = await l2.writeItem(type, data, {});
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+  });
+
+  return server;
+}
+
+/**
+ * Deep merge two objects (for patch operations).
+ */
+function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...target };
+  for (const key of Object.keys(source)) {
+    const sourceVal = source[key];
+    const targetVal = target[key];
+    if (
+      sourceVal !== null && typeof sourceVal === 'object' && !Array.isArray(sourceVal) &&
+      targetVal !== null && typeof targetVal === 'object' && !Array.isArray(targetVal)
+    ) {
+      result[key] = deepMerge(targetVal as Record<string, unknown>, sourceVal as Record<string, unknown>);
+    } else {
+      result[key] = sourceVal;
+    }
+  }
+  return result;
+}
+
+/**
+ * GET /mcp/sse - Establish SSE connection for MCP
+ * Requires OAuth 2.0 Bearer token authentication
+ * Returns the session endpoint URL in the initial message
+ */
+app.get('/mcp/sse', async (req: Request, res: Response) => {
+  console.log('MCP SSE: New connection attempt');
+
+  if (!oauthProvider) {
+    console.log('MCP SSE: OAuth not initialized');
+    res.status(503).json({ error: 'OAuth not initialized' });
+    return;
+  }
+
+  // Extract Bearer token from Authorization header
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    console.log('MCP SSE: Missing Bearer token');
+    res.status(401).json({
+      error: 'unauthorized',
+      detail: 'Bearer token required',
+      www_authenticate: `Bearer realm="Cordelia MCP", resource="${BASE_URL}"`,
+    });
+    return;
+  }
+
+  const token = authHeader.slice(7);
+  let authInfo: AuthInfo;
+
+  try {
+    authInfo = await oauthProvider.verifyAccessToken(token);
+  } catch (error) {
+    console.log('MCP SSE: Invalid token -', (error as Error).message);
+    res.status(401).json({
+      error: 'unauthorized',
+      detail: (error as Error).message,
+      www_authenticate: `Bearer realm="Cordelia MCP", error="invalid_token"`,
+    });
+    return;
+  }
+
+  // Check required scope
+  if (!authInfo.scopes.includes('mcp') && !authInfo.scopes.includes('memory_read')) {
+    console.log('MCP SSE: Insufficient scope');
+    res.status(403).json({
+      error: 'forbidden',
+      detail: 'Token does not have required scope (mcp or memory_read)',
+    });
+    return;
+  }
+
+  const userId = authInfo.extra?.userId as string;
+  if (!userId) {
+    console.log('MCP SSE: Token missing user ID');
+    res.status(401).json({ error: 'unauthorized', detail: 'Token missing user context' });
+    return;
+  }
+
+  console.log(`MCP SSE: Authenticated as user ${userId}`);
+
+  // Create transport - it will generate its own session ID
+  const transport = new SSEServerTransport('/mcp/messages', res);
+
+  // Store transport by its session ID (from _sessionId after start)
+  const server = createMcpServer();
+
+  // Connect server to transport
+  await server.connect(transport);
+
+  // Store transport for message routing (access private _sessionId)
+  const sessionId = (transport as unknown as { _sessionId: string })._sessionId;
+  mcpTransports.set(sessionId, { transport, userId });
+
+  console.log(`MCP SSE: Session ${sessionId} connected for user ${userId}`);
+
+  // Clean up on disconnect
+  req.on('close', () => {
+    console.log(`MCP SSE: Session ${sessionId} disconnected`);
+    mcpTransports.delete(sessionId);
+  });
+});
+
+/**
+ * POST /mcp/messages - Receive messages from MCP client
+ * Query param: sessionId
+ * Validates OAuth Bearer token matches the session owner
+ */
+app.post('/mcp/messages', async (req: Request, res: Response) => {
+  const sessionId = req.query.sessionId as string;
+
+  if (!sessionId) {
+    res.status(400).json({ error: 'Missing sessionId query parameter' });
+    return;
+  }
+
+  const mcpSession = mcpTransports.get(sessionId);
+  if (!mcpSession) {
+    res.status(404).json({ error: 'Session not found', sessionId });
+    return;
+  }
+
+  if (!oauthProvider) {
+    res.status(503).json({ error: 'OAuth not initialized' });
+    return;
+  }
+
+  // Validate OAuth Bearer token
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    res.status(401).json({
+      error: 'unauthorized',
+      detail: 'Bearer token required',
+    });
+    return;
+  }
+
+  const token = authHeader.slice(7);
+  let authInfo: AuthInfo;
+
+  try {
+    authInfo = await oauthProvider.verifyAccessToken(token);
+  } catch (error) {
+    res.status(401).json({
+      error: 'unauthorized',
+      detail: (error as Error).message,
+    });
+    return;
+  }
+
+  const userId = authInfo.extra?.userId as string;
+  if (!userId || userId !== mcpSession.userId) {
+    res.status(401).json({
+      error: 'unauthorized',
+      detail: 'Token does not match session owner',
+    });
+    return;
+  }
+
+  try {
+    await mcpSession.transport.handlePostMessage(req, res);
+  } catch (error) {
+    console.error('MCP SSE: Error handling message:', error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 // Swagger API docs
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   customCss: '.swagger-ui .topbar { display: none }',
@@ -1107,106 +1674,6 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 app.get('/api/docs.json', (_req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/json');
   res.send(swaggerSpec);
-});
-
-// =============================================================================
-// MCP over SSE/StreamableHTTP Transport
-// =============================================================================
-
-// Active SSE transports keyed by session ID
-const sseTransports: Record<string, SSEServerTransport> = {};
-
-function createMcpServer(): McpServer {
-  const mcpServer = new McpServer(
-    { name: 'cordelia', version: '0.2.0' },
-    { capabilities: { tools: {}, resources: {} } }
-  );
-  registerCordeliaTools(mcpServer);
-  return mcpServer;
-}
-
-/**
- * GET /api/health - Lightweight health check (no auth required)
- */
-app.get('/api/health', (_req: Request, res: Response) => {
-  res.json({ ok: true, mode: LOCAL_MODE ? 'local' : 'remote', version: '0.2.0' });
-});
-
-/**
- * GET /sse - SSE transport endpoint (2024-11-05 MCP protocol)
- * Establishes an SSE connection and creates a per-session MCP server.
- */
-app.get('/sse', async (req: Request, res: Response) => {
-  const transport = new SSEServerTransport('/messages', res);
-  sseTransports[transport.sessionId] = transport;
-
-  res.on('close', () => {
-    delete sseTransports[transport.sessionId];
-  });
-
-  const mcpServer = createMcpServer();
-  await mcpServer.connect(transport);
-});
-
-/**
- * POST /messages - SSE message endpoint
- * Routes JSON-RPC messages to the correct SSE transport by sessionId.
- */
-app.post('/messages', async (req: Request, res: Response) => {
-  const sessionId = req.query.sessionId as string;
-  const transport = sseTransports[sessionId];
-
-  if (!transport) {
-    res.status(400).json({ error: 'No active SSE transport for session', sessionId });
-    return;
-  }
-
-  await transport.handlePostMessage(req, res, req.body);
-});
-
-/**
- * ALL /mcp - StreamableHTTP transport (2025-03-26 MCP protocol)
- * Stateful: each initialize request creates a new session.
- */
-const streamableTransports: Record<string, StreamableHTTPServerTransport> = {};
-
-app.all('/mcp', async (req: Request, res: Response) => {
-  // Handle session-based routing
-  const sessionId = req.headers['mcp-session-id'] as string | undefined;
-
-  if (sessionId && streamableTransports[sessionId]) {
-    // Existing session
-    const transport = streamableTransports[sessionId];
-    await transport.handleRequest(req, res, req.body);
-    return;
-  }
-
-  // New session: only accept POST with initialize request
-  if (req.method === 'POST') {
-    const body = req.body;
-    if (isInitializeRequest(body)) {
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-      });
-
-      transport.onclose = () => {
-        const sid = transport.sessionId;
-        if (sid) delete streamableTransports[sid];
-      };
-
-      const mcpServer = createMcpServer();
-      await mcpServer.connect(transport);
-
-      await transport.handleRequest(req, res, body);
-
-      const sid = transport.sessionId;
-      if (sid) streamableTransports[sid] = transport;
-      return;
-    }
-  }
-
-  // Not an initialize request and no valid session
-  res.status(400).json({ error: 'Bad Request: No valid session. Send an initialize request first.' });
 });
 
 // Serve dashboard static files (after API routes)
@@ -1247,13 +1714,105 @@ async function initEncryption(): Promise<void> {
  */
 export async function startServer(opts?: { port?: number; host?: string; memoryRoot?: string }): Promise<import('http').Server> {
   const port = opts?.port ?? PORT;
-  const host = opts?.host ?? (LOCAL_MODE ? '127.0.0.1' : (process.env.HOST ?? '0.0.0.0'));
+  const host = opts?.host ?? process.env.HOST ?? '0.0.0.0';
   const memRoot = opts?.memoryRoot ?? MEMORY_ROOT;
 
   const storageProvider = await initStorageProvider(memRoot);
   console.log(`Cordelia HTTP: Storage provider: ${storageProvider.name}`);
 
   await initEncryption();
+
+  // Initialize OAuth provider (requires SQLite storage)
+  if (storageProvider.name === 'sqlite') {
+    const sqliteStorage = storageProvider as SqliteStorageProvider;
+    oauthProvider = new CordeliaOAuthProvider({
+      storage: sqliteStorage,
+      baseUrl: BASE_URL,
+      accessTokenExpirySeconds: parseInt(process.env.OAUTH_ACCESS_TOKEN_EXPIRY || '3600', 10),
+      refreshTokenExpirySeconds: parseInt(process.env.OAUTH_REFRESH_TOKEN_EXPIRY || '2592000', 10),
+    });
+
+    // Custom authorize handler that allows localhost redirect URIs (RFC 8252)
+    // MUST be registered BEFORE mcpAuthRouter to intercept localhost requests
+    app.get('/authorize', async (req: Request, res: Response, next: NextFunction) => {
+      const redirectUri = req.query.redirect_uri as string;
+      const clientId = req.query.client_id as string;
+
+      // Only handle localhost redirect URIs specially
+      if (!redirectUri || !clientId) {
+        return next();
+      }
+
+      try {
+        const redirectUrl = new URL(redirectUri);
+        const isLocalhost = redirectUrl.hostname === 'localhost' ||
+                           redirectUrl.hostname === '127.0.0.1' ||
+                           redirectUrl.hostname === '[::1]';
+
+        if (!isLocalhost) {
+          return next(); // Let mcpAuthRouter handle non-localhost
+        }
+
+        // For localhost URIs, we need to verify the client exists and allow the redirect
+        const client = await oauthProvider!.clientsStore.getClient(clientId);
+        if (!client) {
+          res.status(400).json({ error: 'invalid_request', error_description: 'Unknown client_id' });
+          return;
+        }
+
+        // Check if any registered redirect_uri is a localhost URI
+        const hasLocalhostRegistered = client.redirect_uris.some((uri) => {
+          const u = new URL(uri.toString());
+          return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]';
+        });
+
+        if (!hasLocalhostRegistered) {
+          // Client didn't register any localhost URIs, reject
+          res.status(400).json({ error: 'invalid_request', error_description: 'Unregistered redirect_uri' });
+          return;
+        }
+
+        // Per RFC 8252, allow any port on localhost for native apps
+        console.log(`OAuth: Allowing localhost redirect: ${redirectUri}`);
+
+        // Build authorization params
+        const scopes = (req.query.scope as string)?.split(' ').filter(Boolean) || [];
+        const codeChallenge = req.query.code_challenge as string;
+        const state = req.query.state as string;
+        const resource = req.query.resource as string;
+
+        if (!codeChallenge) {
+          res.status(400).json({ error: 'invalid_request', error_description: 'PKCE code_challenge required' });
+          return;
+        }
+
+        // Call provider.authorize directly
+        await oauthProvider!.authorize(client, {
+          redirectUri,
+          scopes,
+          codeChallenge,
+          state,
+          resource: resource ? new URL(resource) : undefined,
+        }, res);
+
+      } catch (error) {
+        console.error('OAuth authorize error:', error);
+        res.status(400).json({ error: 'invalid_request', error_description: (error as Error).message });
+      }
+    });
+
+    // Mount OAuth router for standard endpoints (after custom /authorize handler)
+    app.use(mcpAuthRouter({
+      provider: oauthProvider,
+      issuerUrl: new URL(BASE_URL),
+      scopesSupported: ['memory_read', 'memory_write', 'memory_search', 'mcp'],
+      serviceDocumentationUrl: new URL(`${BASE_URL}/api/docs`),
+    }));
+
+    console.log('Cordelia HTTP: OAuth 2.0 enabled');
+  } else {
+    console.log('Cordelia HTTP: OAuth disabled (requires SQLite storage)');
+  }
 
   return new Promise((resolve) => {
     const server = app.listen(port, host, () => {
