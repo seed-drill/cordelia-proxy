@@ -19,6 +19,10 @@
 
 set -euo pipefail
 
+# Security: Use fixed, unwriteable directories only (prevents PATH injection attacks)
+PATH="/usr/local/bin:/usr/bin:/bin"
+export PATH
+
 ENV_FILE="$HOME/.cordelia-env"
 
 if [ ! -f "$ENV_FILE" ]; then

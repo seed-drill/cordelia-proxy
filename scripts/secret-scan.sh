@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+# Security: Use fixed, unwriteable directories only (prevents PATH injection attacks)
+PATH="/usr/local/bin:/usr/bin:/bin"
+export PATH
+
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 # Patterns that indicate real secrets (not references/docs/env var names)

@@ -15,6 +15,10 @@
 
 set -e
 
+# Security: Use fixed, unwriteable directories only (prevents PATH injection attacks)
+PATH="/usr/local/bin:/usr/bin:/bin"
+export PATH
+
 CORDELIA_DIR="$(cd "$(dirname "$0")" && pwd)"
 USER_ID=""
 ENCRYPTION_KEY=""

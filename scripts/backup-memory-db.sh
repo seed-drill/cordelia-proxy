@@ -55,6 +55,10 @@
 
 set -euo pipefail
 
+# Security: Use fixed, unwriteable directories only (prevents PATH injection attacks)
+PATH="/usr/local/bin:/usr/bin:/bin"
+export PATH
+
 DB_PATH="/Users/russellwing/cordelia/memory/cordelia.db"
 BACKUP_PATH="/Users/russellwing/cordelia/memory/cordelia-backup.db"
 # Direct hosts (reachable from WireGuard)

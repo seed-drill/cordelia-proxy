@@ -2,6 +2,10 @@
 # Cordelia PreCompact Hook - Flush insights before context compaction (R2-011)
 # Reads transcript_path from stdin, passes to pre-compact.mjs
 
+# Security: Use fixed, unwriteable directories only (prevents PATH injection attacks)
+PATH="/usr/local/bin:/usr/bin:/bin"
+export PATH
+
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source encryption key

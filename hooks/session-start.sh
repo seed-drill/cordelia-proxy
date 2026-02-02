@@ -2,6 +2,10 @@
 # Cordelia SessionStart Hook - Load L1 hot context via MCP
 # stdout from SessionStart hooks is added to context
 
+# Security: Use fixed, unwriteable directories only (prevents PATH injection attacks)
+PATH="/usr/local/bin:/usr/bin:/bin"
+export PATH
+
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source encryption key from seed-drill .mcp.json
