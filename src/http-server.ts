@@ -453,13 +453,15 @@ app.get('/api/core/status', async (_req: Request, res: Response) => {
   }
 
   try {
-    // Read the bearer token from core's config directory
+    // Read the bearer token: env var first, then file fallback
     const fs = await import('fs/promises');
-    let bearerToken = '';
-    try {
-      bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
-    } catch {
-      // Token file may not exist yet
+    let bearerToken = process.env.CORDELIA_NODE_TOKEN || '';
+    if (!bearerToken) {
+      try {
+        bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
+      } catch {
+        // Token file may not exist yet
+      }
     }
 
     const response = await fetch(`${CORDELIA_CORE_API}/api/v1/status`, {
@@ -518,13 +520,15 @@ app.get('/api/peers', async (_req: Request, res: Response) => {
   }
 
   try {
-    // Read the bearer token from core's config directory
+    // Read the bearer token: env var first, then file fallback
     const fs = await import('fs/promises');
-    let bearerToken = '';
-    try {
-      bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
-    } catch {
-      // Token file may not exist yet
+    let bearerToken = process.env.CORDELIA_NODE_TOKEN || '';
+    if (!bearerToken) {
+      try {
+        bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
+      } catch {
+        // Token file may not exist yet
+      }
     }
 
     const response = await fetch(`${CORDELIA_CORE_API}/api/v1/peers`, {
