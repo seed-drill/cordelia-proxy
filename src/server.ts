@@ -160,4 +160,4 @@ async function main(): Promise<void> {
   console.error('Cordelia MCP server running');
 }
 
-main().catch(console.error);
+await main();

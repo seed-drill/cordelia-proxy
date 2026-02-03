@@ -119,7 +119,8 @@ async function main(): Promise<void> {
   // Check domain field is present on results
   const hasDomain = basicResults.some(r => r.domain !== undefined);
   assert(hasDomain, 'results include domain field');
-  console.log(`  Results: ${basicResults.map(r => `${r.name.slice(0,30)}(${r.domain})`).join(', ')}`);
+  const resultSummary = basicResults.map(r => `${r.name.slice(0,30)}(${r.domain})`).join(', ');
+  console.log(`  Results: ${resultSummary}`);
   console.log();
 
   // =========================================================================
@@ -260,7 +261,9 @@ async function main(): Promise<void> {
   process.exit(failed > 0 ? 1 : 0);
 }
 
-main().catch((e) => {
+try {
+  await main();
+} catch (e) {
   console.error('Fatal:', e);
   process.exit(1);
-});
+}

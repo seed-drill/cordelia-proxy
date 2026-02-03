@@ -260,7 +260,7 @@
     }
 
     .peer-state.cold {
-      background: #999;
+      background: #717171;
       color: white;
     }
 
@@ -478,7 +478,7 @@
           uptimeEl.textContent = '-';
           apiEndpointEl.textContent = data.api_endpoint || '-';
           document.getElementById('network-status').textContent = 'Offline';
-          document.getElementById('network-status').style.color = '#999';
+          document.getElementById('network-status').style.color = '#595959';
         }
       } catch (error) {
         console.error('Core status error:', error);
@@ -511,7 +511,7 @@
 
         if (data.error) {
           document.getElementById('network-status').textContent = 'Offline';
-          document.getElementById('network-status').style.color = '#999';
+          document.getElementById('network-status').style.color = '#595959';
         } else if (data.total > 0) {
           document.getElementById('network-status').textContent = 'Online';
           document.getElementById('network-status').style.color = 'var(--color-deep-green)';
@@ -562,7 +562,7 @@
 
         if (data.error) {
           document.getElementById('network-status').textContent = 'Offline';
-          document.getElementById('network-status').style.color = '#999';
+          document.getElementById('network-status').style.color = '#595959';
         } else if (data.total > 0) {
           document.getElementById('network-status').textContent = 'Online';
           document.getElementById('network-status').style.color = 'var(--color-deep-green)';

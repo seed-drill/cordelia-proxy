@@ -66,7 +66,9 @@ async function main(): Promise<void> {
   await provider.close();
 }
 
-main().catch((e) => {
+try {
+  await main();
+} catch (e) {
   console.error('Fatal:', e);
   process.exit(1);
-});
+}

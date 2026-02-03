@@ -501,16 +501,19 @@ async function resolveEntry(
 /**
  * Build diagnostics object for debug mode.
  */
-function buildDiagnostics(
-  finalResults: SearchResult[],
-  debugScores: Array<{ id: string; fts_score: number; vec_score: number; combined_score: number }>,
-  vecAvailable: boolean,
-  useVec: boolean,
-  queryEmbeddingGenerated: boolean,
-  ftsCount: number,
-  vecCount: number,
-  indexEntryCount: number,
-): SearchDiagnostics {
+interface BuildDiagnosticsOptions {
+  finalResults: SearchResult[];
+  debugScores: Array<{ id: string; fts_score: number; vec_score: number; combined_score: number }>;
+  vecAvailable: boolean;
+  useVec: boolean;
+  queryEmbeddingGenerated: boolean;
+  ftsCount: number;
+  vecCount: number;
+  indexEntryCount: number;
+}
+
+function buildDiagnostics(opts: BuildDiagnosticsOptions): SearchDiagnostics {
+  const { finalResults, debugScores, vecAvailable, useVec, queryEmbeddingGenerated, ftsCount, vecCount, indexEntryCount } = opts;
   const resultIds = new Set(finalResults.map((r) => r.id));
   const filteredDebugScores = debugScores
     .filter((d) => resultIds.has(d.id))
@@ -628,16 +631,16 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
   for (const r of finalResults) await ctx.storage.recordAccess(r.id);
 
   return wrapSearchResults(finalResults, debug, {
-    ...buildDiagnostics(
+    ...buildDiagnostics({
       finalResults,
       debugScores,
-      ctx.storage.vecAvailable(),
+      vecAvailable: ctx.storage.vecAvailable(),
       useVec,
       queryEmbeddingGenerated,
-      ftsScores.size,
-      vecScores.size,
-      ctx.indexEntryCount,
-    ),
+      ftsCount: ftsScores.size,
+      vecCount: vecScores.size,
+      indexEntryCount: ctx.indexEntryCount,
+    }),
   });
 }
 
@@ -675,7 +678,7 @@ async function decryptPayload(
   id: string,
 ): Promise<unknown> {
   const itemMeta = await storage.readL2ItemMeta(id);
-  if (itemMeta && itemMeta.key_version === 2 && itemMeta.group_id) {
+  if (itemMeta?.key_version === 2 && itemMeta.group_id) {
     const { getGroupKey, groupDecrypt } = await import('./group-keys.js');
     const groupKey = await getGroupKey(itemMeta.group_id);
     if (groupKey) {
@@ -963,11 +966,9 @@ export async function writeItem(
     if (culture?.ttl_default && culture.ttl_default > 0) {
       ttlExpires = new Date(Date.now() + culture.ttl_default * 1000).toISOString();
     }
-  } else {
+  } else if (domain === 'interrupt') {
     // Private item: domain governs lifecycle
-    if (domain === 'interrupt') {
-      ttlExpires = computeInterruptTtl();
-    }
+    ttlExpires = computeInterruptTtl();
   }
 
   // Write via storage provider

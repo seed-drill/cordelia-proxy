@@ -159,7 +159,9 @@ async function migrate(): Promise<void> {
   console.log('SQLite is now the default storage backend.');
 }
 
-migrate().catch((error) => {
+try {
+  await migrate();
+} catch (error) {
   console.error('Migration failed:', error);
   process.exit(1);
-});
+}

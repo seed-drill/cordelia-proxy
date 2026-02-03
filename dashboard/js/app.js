@@ -532,8 +532,8 @@ function renderL2Summary(l2Index) {
   // Get 10 most recent items
   const recent = [...entries].slice(0, 10);
   const recentHtml = recent.map(item => {
-    const typeClass = item.type === 'session' ? 'session' :
-                      item.type === 'learning' ? 'learning' : '';
+    const isLearning = item.type === 'learning' ? 'learning' : '';
+    const typeClass = item.type === 'session' ? 'session' : isLearning;
     return `
       <div class="l2-item">
         <span class="l2-item-type ${typeClass}">${item.type}</span>

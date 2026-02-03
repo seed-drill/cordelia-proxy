@@ -38,9 +38,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-info()  { echo -e "${GREEN}[OK]${NC} $1"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+info()  { local msg="$1"; echo -e "${GREEN}[OK]${NC} $msg"; return 0; }
+warn()  { local msg="$1"; echo -e "${YELLOW}[WARN]${NC} $msg"; return 0; }
+error() { local msg="$1"; echo -e "${RED}[ERROR]${NC} $msg" >&2; exit 1; }
 phase() {
     local num="$1"
     local label="$2"

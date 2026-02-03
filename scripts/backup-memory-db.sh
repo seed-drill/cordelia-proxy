@@ -70,17 +70,19 @@ LOG="/Users/russellwing/cordelia/logs/backup-memory.log"
 mkdir -p "$(dirname "$LOG")"
 
 log() {
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $1" >> "$LOG"
+    local msg="$1"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $msg" >> "$LOG"
+    return 0
 }
 
 # Pre-flight: check DB exists
-if [ ! -f "$DB_PATH" ]; then
+if [[ ! -f "$DB_PATH" ]]; then
     log "ERROR: Database not found at $DB_PATH"
     exit 1
 fi
 
 # Pre-flight: check encryption key is available
-if [ -z "${CORDELIA_ENCRYPTION_KEY:-}" ]; then
+if [[ -z "${CORDELIA_ENCRYPTION_KEY:-}" ]]; then
     log "WARN: CORDELIA_ENCRYPTION_KEY not set - key escrow skipped"
 fi
 
@@ -120,81 +122,84 @@ fi
 #   - Rotate key and re-encrypt on schedule
 # ---------------------------------------------------------------
 escrow_key_to_host() {
-    local HOST="$1"
-    local JUMP="${2:-}"
-    local RSYNC_SSH=""
-    local SSH_CMD="ssh"
-    if [ -n "$JUMP" ]; then
-        RSYNC_SSH="-e ssh -J $JUMP"
-        SSH_CMD="ssh -J $JUMP"
+    local host="$1"
+    local jump="${2:-}"
+    local rsync_ssh=""
+    local ssh_cmd="ssh"
+    if [[ -n "$jump" ]]; then
+        rsync_ssh="-e ssh -J $jump"
+        ssh_cmd="ssh -J $jump"
     fi
 
-    if [ -z "${CORDELIA_ENCRYPTION_KEY:-}" ]; then
+    if [[ -z "${CORDELIA_ENCRYPTION_KEY:-}" ]]; then
         return 0  # nothing to escrow
     fi
 
     # Write key to temp file with strict perms
-    local TMP_KEY
-    TMP_KEY=$(mktemp)
-    chmod 600 "$TMP_KEY"
-    printf '%s' "$CORDELIA_ENCRYPTION_KEY" > "$TMP_KEY"
+    local tmp_key
+    tmp_key=$(mktemp)
+    chmod 600 "$tmp_key"
+    printf '%s' "$CORDELIA_ENCRYPTION_KEY" > "$tmp_key"
 
     # Ensure remote dir exists
-    if ! $SSH_CMD "$HOST" "mkdir -p ${REMOTE_DIR}" 2>>"$LOG"; then
-        log "ERROR: Key escrow failed (mkdir) to ${HOST}"
-        rm -f "$TMP_KEY"
+    if ! $ssh_cmd "$host" "mkdir -p ${REMOTE_DIR}" 2>>"$LOG"; then
+        log "ERROR: Key escrow failed (mkdir) to ${host}"
+        rm -f "$tmp_key"
         FAILED=$((FAILED + 1))
         return 1
     fi
 
     # Rsync key file to remote, then set perms
-    local RSYNC_ARGS=("-az")
-    if [ -n "$JUMP" ]; then
-        RSYNC_ARGS+=("-e" "ssh -J $JUMP")
+    local rsync_args=("-az")
+    if [[ -n "$jump" ]]; then
+        rsync_args+=("-e" "ssh -J $jump")
     fi
-    if rsync "${RSYNC_ARGS[@]}" "$TMP_KEY" "${HOST}:${KEY_FILE}" 2>>"$LOG" && \
-       $SSH_CMD "$HOST" "chmod 600 ${KEY_FILE}" 2>>"$LOG"; then
-        log "OK: Encryption key escrowed to ${HOST}"
+    if rsync "${rsync_args[@]}" "$tmp_key" "${host}:${KEY_FILE}" 2>>"$LOG" && \
+       $ssh_cmd "$host" "chmod 600 ${KEY_FILE}" 2>>"$LOG"; then
+        log "OK: Encryption key escrowed to ${host}"
     else
-        log "ERROR: Key escrow failed to ${HOST}"
+        log "ERROR: Key escrow failed to ${host}"
         FAILED=$((FAILED + 1))
     fi
 
     # Clean up temp file
-    rm -f "$TMP_KEY"
+    rm -f "$tmp_key"
+    return 0
 }
 
 # Sync function: DB + JSON memories to a host, with optional jump
 sync_to_host() {
-    local HOST="$1"
-    local RSYNC_OPTS="-az"
-    local SSH_OPTS=""
-    if [ -n "${2:-}" ]; then
-        SSH_OPTS="-e 'ssh -J $2'"
+    local host="$1"
+    local jump="${2:-}"
+    local rsync_opts="-az"
+    local ssh_opts=""
+    if [[ -n "$jump" ]]; then
+        ssh_opts="-e 'ssh -J $jump'"
     fi
 
     # Escrow encryption key first
-    escrow_key_to_host "$HOST" "${2:-}"
+    escrow_key_to_host "$host" "$jump"
 
     # Sync SQLite DB
-    if eval rsync $RSYNC_OPTS $SSH_OPTS "$BACKUP_PATH" "${HOST}:${REMOTE_DIR}/cordelia.db" 2>>"$LOG"; then
-        log "OK: Synced DB to ${HOST}"
+    if eval rsync $rsync_opts $ssh_opts "$BACKUP_PATH" "${host}:${REMOTE_DIR}/cordelia.db" 2>>"$LOG"; then
+        log "OK: Synced DB to ${host}"
     else
-        log "ERROR: Failed to sync DB to ${HOST}"
+        log "ERROR: Failed to sync DB to ${host}" >&2
         FAILED=$((FAILED + 1))
     fi
 
     # Sync JSON memory files
-    if eval rsync $RSYNC_OPTS $SSH_OPTS /Users/russellwing/cordelia/memory/ "${HOST}:${REMOTE_DIR}/memory/" \
+    if eval rsync $rsync_opts $ssh_opts /Users/russellwing/cordelia/memory/ "${host}:${REMOTE_DIR}/memory/" \
         --exclude="'cordelia.db'" \
         --exclude="'cordelia.db-wal'" \
         --exclude="'cordelia.db-shm'" \
         --exclude="'cordelia-backup.db'" 2>>"$LOG"; then
-        log "OK: JSON memory synced to ${HOST}"
+        log "OK: JSON memory synced to ${host}"
     else
-        log "ERROR: JSON memory sync failed to ${HOST}"
+        log "ERROR: JSON memory sync failed to ${host}" >&2
         FAILED=$((FAILED + 1))
     fi
+    return 0
 }
 
 FAILED=0
@@ -209,7 +214,7 @@ for HOST in "${JUMP_HOSTS[@]}"; do
     sync_to_host "$HOST" "$JUMP_VIA"
 done
 
-if [ "$FAILED" -gt 0 ]; then
+if [[ "$FAILED" -gt 0 ]]; then
     log "WARN: ${FAILED} sync operations failed"
     exit 1
 else

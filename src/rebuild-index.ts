@@ -71,7 +71,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
+try {
+  await main();
+} catch (error) {
   console.error('Rebuild failed:', error);
   process.exit(1);
-});
+}

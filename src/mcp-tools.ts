@@ -454,12 +454,12 @@ async function handleMemoryReadWarm(args: Record<string, unknown>): Promise<McpT
   if (entity_id) {
     const storage = getStorageProvider();
     const meta = await storage.readL2ItemMeta(id);
-    if (meta && meta.visibility === 'group' && meta.group_id) {
+    if (meta?.visibility === 'group' && meta.group_id) {
       const membership = await storage.getMembership(meta.group_id, entity_id);
       if (!membership) {
         return jsonResponse({ error: 'unauthorized', detail: 'not a member of group' });
       }
-    } else if (meta && meta.visibility === 'private' && meta.owner_id && meta.owner_id !== entity_id) {
+    } else if (meta?.visibility === 'private' && meta.owner_id && meta.owner_id !== entity_id) {
       return jsonResponse({ error: 'unauthorized', detail: 'not owner of private item' });
     }
   }
@@ -506,7 +506,7 @@ async function handleMemoryDeleteWarm(args: Record<string, unknown>): Promise<Mc
   if (entity_id) {
     const storage = getStorageProvider();
     const meta = await storage.readL2ItemMeta(id);
-    if (meta && meta.visibility === 'group' && meta.group_id) {
+    if (meta?.visibility === 'group' && meta.group_id) {
       const membership = await storage.getMembership(meta.group_id, entity_id);
       if (!membership) {
         return jsonResponse({ error: 'unauthorized', detail: 'not a member of group' });
@@ -514,7 +514,7 @@ async function handleMemoryDeleteWarm(args: Record<string, unknown>): Promise<Mc
       if (membership.role !== 'owner' && membership.role !== 'admin' && meta.author_id !== entity_id) {
         return jsonResponse({ error: 'unauthorized', detail: 'only owner/admin or author can delete group items' });
       }
-    } else if (meta && meta.visibility === 'private' && meta.owner_id && meta.owner_id !== entity_id) {
+    } else if (meta?.visibility === 'private' && meta.owner_id && meta.owner_id !== entity_id) {
       return jsonResponse({ error: 'unauthorized', detail: 'not owner of private item' });
     }
   }

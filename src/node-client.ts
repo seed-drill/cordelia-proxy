@@ -73,9 +73,9 @@ export interface StatusResponse {
 }
 
 export class NodeClient {
-  private baseUrl: string;
-  private token: string;
-  private timeoutMs: number;
+  private readonly baseUrl: string;
+  private readonly token: string;
+  private readonly timeoutMs: number;
 
   constructor(opts: NodeClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/$/, '');

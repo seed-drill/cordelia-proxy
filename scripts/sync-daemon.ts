@@ -58,7 +58,8 @@ let syncInProgress = false;
 
 function log(message: string, level: 'info' | 'warn' | 'error' | 'success' = 'info') {
   const timestamp = new Date().toISOString();
-  const prefix = level === 'error' ? '✗' : level === 'warn' ? '⚠' : level === 'success' ? '✓' : '↔';
+  const prefixMap = { error: '✗', warn: '⚠', success: '✓', info: '↔' } as const;
+  const prefix = prefixMap[level];
   console.log(`[${timestamp}] ${prefix} ${message}`);
 }
 
@@ -331,7 +332,9 @@ async function main() {
   });
 }
 
-main().catch((error) => {
-  log(`Fatal error: ${error.message}`, 'error');
+try {
+  await main();
+} catch (error) {
+  log(`Fatal error: ${(error as Error).message}`, 'error');
   process.exit(1);
-});
+}

@@ -162,4 +162,4 @@ async function runTests(): Promise<void> {
   }
 }
 
-runTests().catch(console.error);
+await runTests();

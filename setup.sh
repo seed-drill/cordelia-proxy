@@ -27,6 +27,7 @@ detect_os() {
         Linux)  echo "linux" ;;
         *)      echo "unknown" ;;
     esac
+    return 0
 }
 
 OS="$(detect_os)"
@@ -38,9 +39,9 @@ for arg in "$@"; do
             NO_EMBEDDINGS=true
             ;;
         *)
-            if [ -z "$USER_ID" ]; then
+            if [[ -z "$USER_ID" ]]; then
                 USER_ID="$arg"
-            elif [ -z "$ENCRYPTION_KEY" ]; then
+            elif [[ -z "$ENCRYPTION_KEY" ]]; then
                 ENCRYPTION_KEY="$arg"
             fi
             ;;
@@ -54,13 +55,13 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-info() { echo -e "${GREEN}[OK]${NC} $1"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-step() { echo -e "${BLUE}[STEP]${NC} $1"; }
+info() { local msg="$1"; echo -e "${GREEN}[OK]${NC} $msg"; return 0; }
+warn() { local msg="$1"; echo -e "${YELLOW}[WARN]${NC} $msg"; return 0; }
+error() { local msg="$1"; echo -e "${RED}[ERROR]${NC} $msg" >&2; exit 1; }
+step() { local msg="$1"; echo -e "${BLUE}[STEP]${NC} $msg"; return 0; }
 
 # Check arguments
-if [ -z "$USER_ID" ]; then
+if [[ -z "$USER_ID" ]]; then
     echo "Cordelia Setup (Manual Version)"
     echo ""
     echo "Usage: ./setup.sh <user_id> [--no-embeddings] [encryption_key]"
@@ -87,7 +88,7 @@ echo ""
 # Step 1: Check Node.js
 step "Checking prerequisites..."
 if ! command -v node &> /dev/null; then
-    if [ "$OS" = "linux" ]; then
+    if [[ "$OS" = "linux" ]]; then
         error "Node.js is required but not installed. Install via: curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs"
     else
         error "Node.js is required but not installed. Install via: brew install node"
@@ -97,27 +98,27 @@ info "Node.js: $(node --version)"
 
 # Step 2: Install dependencies if needed
 step "Installing dependencies..."
-if [ ! -d "$CORDELIA_DIR/node_modules" ]; then
+if [[ ! -d "$CORDELIA_DIR/node_modules" ]]; then
     cd "$CORDELIA_DIR" && npm install --silent
 fi
 info "Dependencies ready"
 
 # Step 3: Build if needed
 step "Building Cordelia..."
-if [ ! -d "$CORDELIA_DIR/dist" ]; then
+if [[ ! -d "$CORDELIA_DIR/dist" ]]; then
     cd "$CORDELIA_DIR" && npm run build --silent 2>/dev/null || npm run build
 fi
 info "Build ready"
 
 # Step 4: Generate or use encryption key
 step "Setting up encryption..."
-if [ -z "$ENCRYPTION_KEY" ]; then
+if [[ -z "$ENCRYPTION_KEY" ]]; then
     ENCRYPTION_KEY=$(openssl rand -hex 32)
     info "Generated new 64-character hex key"
 else
     # Validate provided key length
     KEY_LEN=${#ENCRYPTION_KEY}
-    if [ "$KEY_LEN" -ne 64 ]; then
+    if [[ "$KEY_LEN" -ne 64 ]]; then
         warn "Provided key is $KEY_LEN chars, should be 64"
     fi
     info "Using provided encryption key"
@@ -129,7 +130,7 @@ step "Configuring global MCP server..."
 GLOBAL_MCP="$HOME/.claude.json"
 
 # Build the env object based on embeddings setting
-if [ "$NO_EMBEDDINGS" = true ]; then
+if [[ "$NO_EMBEDDINGS" = true ]]; then
     ENV_JSON="{\"CORDELIA_ENCRYPTION_KEY\": \"$ENCRYPTION_KEY\", \"CORDELIA_EMBEDDING_PROVIDER\": \"none\"}"
 else
     ENV_JSON="{\"CORDELIA_ENCRYPTION_KEY\": \"$ENCRYPTION_KEY\"}"
@@ -172,7 +173,7 @@ step "Creating L1 memory context..."
 L1_DIR="$CORDELIA_DIR/memory/L1-hot"
 L1_FILE="$L1_DIR/$USER_ID.json"
 
-if [ ! -f "$L1_FILE" ] || [ ! -s "$L1_FILE" ]; then
+if [[ ! -f "$L1_FILE" ]] || [[ ! -s "$L1_FILE" ]]; then
     mkdir -p "$L1_DIR"
 
     # Capitalize first letter of user_id for name (portable method)
@@ -240,7 +241,7 @@ echo "========================================"
 echo "   Setup Complete - Manual Steps Below"
 echo "========================================"
 echo ""
-if [ "$OS" = "linux" ]; then
+if [[ "$OS" = "linux" ]]; then
     SUGGESTED_PROFILE="~/.bashrc"
 else
     SUGGESTED_PROFILE="~/.zshrc"

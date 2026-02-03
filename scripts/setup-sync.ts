@@ -117,7 +117,9 @@ async function main() {
   log(`API key also saved to ${envPath}`);
 }
 
-main().catch((error) => {
-  log(`Fatal error: ${error.message}`);
+try {
+  await main();
+} catch (error) {
+  log(`Fatal error: ${(error as Error).message}`);
   process.exit(1);
-});
+}

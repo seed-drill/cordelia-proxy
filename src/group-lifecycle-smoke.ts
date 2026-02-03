@@ -262,15 +262,15 @@ async function main(): Promise<void> {
   process.exit(failed > 0 ? 1 : 0);
 }
 
-main().catch((e) => {
+try {
+  await main();
+} catch (e) {
   console.error('Fatal:', e);
   // Attempt cleanup on error
-  (async () => {
-    try {
-      const provider = await initStorageProvider(MEMORY_ROOT);
-      for (const id of testIds) await provider.deleteL2Item(id);
-      await provider.close();
-    } catch { /* best effort */ }
-  })();
+  try {
+    const provider = await initStorageProvider(MEMORY_ROOT);
+    for (const id of testIds) await provider.deleteL2Item(id);
+    await provider.close();
+  } catch { /* best effort */ }
   process.exit(1);
-});
+}

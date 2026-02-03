@@ -1503,5 +1503,5 @@ const isDirectRun = process.argv[1] && (
 );
 
 if (isDirectRun) {
-  startServer().catch(console.error);
+  await startServer();
 }

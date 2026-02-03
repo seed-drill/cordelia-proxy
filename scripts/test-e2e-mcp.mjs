@@ -311,7 +311,9 @@ async function main() {
   process.exit(failed > 0 ? 1 : 0);
 }
 
-main().catch((e) => {
+try {
+  await main();
+} catch (e) {
   console.error(`\nFATAL: ${e.message}`);
   process.exit(1);
-});
+}

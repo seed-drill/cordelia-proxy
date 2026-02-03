@@ -37,8 +37,10 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-function count(ok: boolean): void {
-  if (ok) passed++; else failed++;
+function countPass(): void { passed++; }
+function countFail(): void { failed++; }
+function count(result: { ok: boolean }): void {
+  if (result.ok) countPass(); else countFail();
 }
 
 // --- Tests ---
@@ -57,7 +59,7 @@ async function runTests(): Promise<void> {
   console.log(`  Storage: ${storage.name}, temp dir: ${tmpDir}\n`);
 
   // --- 1. Write entity with details ---
-  count(await test('write entity with details containing "386DX33"', async () => {
+  count({ ok: await test('write entity with details containing "386DX33"', async () => {
     const result = await l2.writeItem('entity', {
       type: 'concept',
       name: 'Connectionist Research',
@@ -70,10 +72,10 @@ async function runTests(): Promise<void> {
       tags: ['ai', 'neural-networks', 'manchester'],
     });
     assert('success' in result && result.success === true, `write failed: ${JSON.stringify(result)}`);
-  }));
+  }) });
 
   // --- 2. Write a second entity for multi-result tests ---
-  count(await test('write second entity', async () => {
+  count({ ok: await test('write second entity', async () => {
     const result = await l2.writeItem('entity', {
       type: 'person',
       name: 'Ada Lovelace',
@@ -81,55 +83,55 @@ async function runTests(): Promise<void> {
       tags: ['computing', 'history'],
     });
     assert('success' in result && result.success === true, `write failed: ${JSON.stringify(result)}`);
-  }));
+  }) });
 
   // --- 3. Verify FTS entry exists (SQLite only) ---
   if (isSqlite) {
-    count(await test('FTS entry exists for written entity', async () => {
+    count({ ok: await test('FTS entry exists for written entity', async () => {
       const sqliteStorage = storage as SqliteStorageProvider;
       const ftsResults = await sqliteStorage.ftsSearch('386DX33', 10);
       assert(ftsResults.length > 0, 'FTS should find entity by details content "386DX33"');
-    }));
+    }) });
 
-    count(await test('FTS entry exists for entity name', async () => {
+    count({ ok: await test('FTS entry exists for entity name', async () => {
       const sqliteStorage = storage as SqliteStorageProvider;
       const ftsResults = await sqliteStorage.ftsSearch('Connectionist', 10);
       assert(ftsResults.length > 0, 'FTS should find entity by name');
-    }));
+    }) });
   }
 
   // --- 4. Search by keyword returns results ---
-  count(await test('search finds entity by details keyword "386"', async () => {
+  count({ ok: await test('search finds entity by details keyword "386"', async () => {
     const results = await l2.search({ query: '386DX33' });
     assert(results.length > 0, 'should find entity containing "386DX33" in details');
     assert(results[0].name === 'Connectionist Research', `expected "Connectionist Research", got "${results[0].name}"`);
-  }));
+  }) });
 
-  count(await test('search finds entity by name', async () => {
+  count({ ok: await test('search finds entity by name', async () => {
     const results = await l2.search({ query: 'Connectionist' });
     assert(results.length > 0, 'should find entity by name');
-  }));
+  }) });
 
-  count(await test('search finds entity by tag-adjacent keyword "manchester"', async () => {
+  count({ ok: await test('search finds entity by tag-adjacent keyword "manchester"', async () => {
     const results = await l2.search({ query: 'manchester' });
     assert(results.length > 0, 'should find entity with "manchester" in details/tags');
-  }));
+  }) });
 
   // --- 5. Search with type filter ---
-  count(await test('search with type filter only returns matching type', async () => {
+  count({ ok: await test('search with type filter only returns matching type', async () => {
     const results = await l2.search({ query: 'Connectionist', type: 'learning' });
     assert(results.length === 0, 'should not find entity when filtering for learnings');
-  }));
+  }) });
 
   // --- 6. Search with tag filter ---
-  count(await test('search with tag filter', async () => {
+  count({ ok: await test('search with tag filter', async () => {
     const results = await l2.search({ tags: ['ai'] });
     assert(results.length > 0, 'should find items tagged "ai"');
     assert(results.every((r) => r.tags.includes('ai')), 'all results should have "ai" tag');
-  }));
+  }) });
 
   // --- 7. Debug mode returns diagnostics ---
-  count(await test('search with debug=true returns diagnostics', async () => {
+  count({ ok: await test('search with debug=true returns diagnostics', async () => {
     const { results, diagnostics } = await l2.search({ query: 'Connectionist', debug: true as const });
     assert(results.length > 0, 'should still return results');
     assert(diagnostics.search_path === 'sql', `expected search_path "sql", got "${diagnostics.search_path}"`);
@@ -141,21 +143,21 @@ async function runTests(): Promise<void> {
     // Since embeddings are disabled, vec should not be used
     assert(diagnostics.vec_used === false, 'vec should not be used with none provider');
     assert(diagnostics.query_embedding_generated === false, 'no embedding should be generated with none provider');
-  }));
+  }) });
 
-  count(await test('search with debug=true and no query returns diagnostics', async () => {
+  count({ ok: await test('search with debug=true and no query returns diagnostics', async () => {
     const { diagnostics } = await l2.search({ debug: true as const });
     assert(diagnostics.fts_candidates === 0, 'no FTS candidates for no-query search');
-  }));
+  }) });
 
   // --- 8. No results for nonsense query ---
-  count(await test('search returns empty for nonsense query', async () => {
+  count({ ok: await test('search returns empty for nonsense query', async () => {
     const results = await l2.search({ query: 'xyzzy99plugh' });
     assert(results.length === 0, 'should return no results for nonsense query');
-  }));
+  }) });
 
   // --- 9. Delete entity and verify search no longer finds it ---
-  count(await test('deleted entity disappears from search', async () => {
+  count({ ok: await test('deleted entity disappears from search', async () => {
     const before = await l2.search({ query: 'Ada Lovelace' });
     assert(before.length > 0, 'should find Ada Lovelace before delete');
 
@@ -164,11 +166,11 @@ async function runTests(): Promise<void> {
 
     const after = await l2.search({ query: 'Ada Lovelace' });
     assert(after.length === 0, 'should not find Ada Lovelace after delete');
-  }));
+  }) });
 
   // --- 10. Backfill recovers FTS after manual deletion (SQLite only) ---
   if (isSqlite) {
-    count(await test('backfill recovers FTS after manual deletion', async () => {
+    count({ ok: await test('backfill recovers FTS after manual deletion', async () => {
       const sqliteStorage = storage as SqliteStorageProvider;
       const db = sqliteStorage.getDatabase();
 
@@ -184,7 +186,7 @@ async function runTests(): Promise<void> {
       // Verify search works again
       const searchResults = await l2.search({ query: 'Connectionist' });
       assert(searchResults.length > 0, 'search should work after backfill');
-    }));
+    }) });
   }
 
   // --- Cleanup ---

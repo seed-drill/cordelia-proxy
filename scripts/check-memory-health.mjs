@@ -577,7 +577,9 @@ async function main() {
   printReport();
 }
 
-main().catch((e) => {
+try {
+  await main();
+} catch (e) {
   console.error(`\nFATAL: ${e.message}`);
   process.exit(1);
-});
+}
