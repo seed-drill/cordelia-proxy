@@ -557,16 +557,21 @@ function wrapSearchResults(
   return results;
 }
 
+interface ScoreCandidateOpts {
+  id: string;
+  ctx: SearchContext;
+  ftsScores: Map<string, number>;
+  vecScores: Map<string, number>;
+  hasSemanticScores: boolean;
+  type?: L2ItemType;
+  tags?: string[];
+  domainFilter?: MemoryDomain;
+}
+
 async function scoreCandidate(
-  id: string,
-  ctx: SearchContext,
-  ftsScores: Map<string, number>,
-  vecScores: Map<string, number>,
-  hasSemanticScores: boolean,
-  type?: L2ItemType,
-  tags?: string[],
-  domainFilter?: MemoryDomain,
+  opts: ScoreCandidateOpts,
 ): Promise<{ result: SearchResult; debug: { id: string; fts_score: number; vec_score: number; combined_score: number } } | null> {
+  const { id, ctx, ftsScores, vecScores, hasSemanticScores, type, tags, domainFilter } = opts;
   const entry = ctx.entryMap.get(id) ?? await resolveEntry(id, ctx.storage);
   if (!entry || !filterEntryByOptions(entry, type, tags, domainFilter)) return null;
 
@@ -621,7 +626,7 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
   const debugScores: Array<{ id: string; fts_score: number; vec_score: number; combined_score: number }> = [];
 
   for (const id of candidateIds) {
-    const scored = await scoreCandidate(id, ctx, ftsScores, vecScores, hasSemanticScores, type, tags, domainFilter);
+    const scored = await scoreCandidate({ id, ctx, ftsScores, vecScores, hasSemanticScores, type, tags, domainFilter });
     if (!scored) continue;
 
     results.push(scored.result);

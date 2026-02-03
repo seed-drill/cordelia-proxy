@@ -245,7 +245,7 @@
     <p>Project Cordelia - Seed Drill</p>
   </footer>
 
-  <script>
+  <script type="module">
     const API_BASE = '';
     const messagesEl = document.getElementById('messages');
     const inputEl = document.getElementById('input');
@@ -653,7 +653,7 @@ Does this look right?`,
     };
 
     // Start conversation
-    showStep(steps[0]);
+    await showStep(steps[0]);
   </script>
 </body>
 </html>

@@ -57,7 +57,11 @@ NC='\033[0m'
 
 info() { local msg="$1"; echo -e "${GREEN}[OK]${NC} $msg"; return 0; }
 warn() { local msg="$1"; echo -e "${YELLOW}[WARN]${NC} $msg"; return 0; }
-error() { local msg="$1"; echo -e "${RED}[ERROR]${NC} $msg" >&2; exit 1; }
+error() {
+    local msg="$1"
+    echo -e "${RED}[ERROR]${NC} $msg" >&2
+    exit 1
+}
 step() { local msg="$1"; echo -e "${BLUE}[STEP]${NC} $msg"; return 0; }
 
 # Check arguments
