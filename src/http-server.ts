@@ -771,6 +771,11 @@ app.post('/api/groups', async (req: Request, res: Response) => {
 
     // Add creator as owner if entity_id provided
     if (entity_id) {
+      // Ensure entity exists in l1_hot (FK constraint on group_members)
+      const existing = await storage.readL1(entity_id);
+      if (!existing) {
+        await storage.writeL1(entity_id, Buffer.from('{}'));
+      }
       await storage.addMember(id, entity_id, 'owner');
     }
 
@@ -812,6 +817,11 @@ app.post('/api/groups/:id/members', async (req: Request, res: Response) => {
     }
 
     const storage = getStorageProvider();
+    // Ensure entity exists in l1_hot (FK constraint on group_members)
+    const existing = await storage.readL1(entity_id);
+    if (!existing) {
+      await storage.writeL1(entity_id, Buffer.from('{}'));
+    }
     await storage.addMember(groupId, entity_id, role || 'member');
     res.json({ success: true, group_id: groupId, entity_id });
   } catch (error) {
