@@ -34,6 +34,25 @@ For historical information, use `memory_search` to find relevant entities or lea
 3. **Respect privacy** - Memory is encrypted, but be thoughtful about what you store
 4. **Session continuity** - Cordelia exists to make sessions feel continuous, not isolated
 
+## Deprecated Files (moved to cordelia-agent-sdk)
+
+The following files in this repo are **deprecated** and will be removed in a future release.
+They remain temporarily so existing installs with proxy-based hook paths continue to work
+until users re-run the installer (which migrates hooks to SDK paths).
+
+- `install.sh` -- moved to cordelia-agent-sdk
+- `setup.sh` -- moved to cordelia-agent-sdk
+- `hooks/*` (11 files) -- moved to cordelia-agent-sdk/hooks/
+- `skills/*` (3 dirs) -- moved to cordelia-agent-sdk/skills/
+- `setup/*` (plist, service) -- moved to cordelia-agent-sdk/setup/
+- `scripts/seed-l1.mjs` -- moved to cordelia-agent-sdk/scripts/
+- `scripts/check-memory-health.mjs` -- moved to cordelia-agent-sdk/scripts/
+- `scripts/backup-memory-db.sh` -- moved to cordelia-agent-sdk/scripts/
+- `scripts/backup-cron-wrapper.sh` -- moved to cordelia-agent-sdk/scripts/
+
+**Do not modify these files.** All changes should go to cordelia-agent-sdk instead.
+Removal tracked in seed-drill BACKLOG under "Proxy deprecated file cleanup".
+
 ## Project Structure
 
 TypeScript MCP server. Key source files in `src/`:
