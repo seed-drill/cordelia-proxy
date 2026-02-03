@@ -1137,9 +1137,31 @@ app.post('/api/enroll', async (req: Request, res: Response) => {
   }
   const formattedCode = `${normalizedCode.slice(0, 4)}-${normalizedCode.slice(4)}`;
 
-  const portalBase = portal_url?.replace(/\/$/, '') || process.env.PORTAL_URL;
-  if (!portalBase) {
+  // Validate portal URL to prevent SSRF -- only allow http(s) URLs
+  const rawPortalUrl = portal_url?.replace(/\/$/, '') || process.env.PORTAL_URL;
+  if (!rawPortalUrl) {
     res.status(400).json({ error: 'portal_url required (or set PORTAL_URL env)' });
+    return;
+  }
+
+  let portalBase: string;
+  try {
+    const parsed = new URL(rawPortalUrl);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      res.status(400).json({ error: 'portal_url must use http or https' });
+      return;
+    }
+    // Reject internal/loopback unless PORTAL_URL env is set (trusted config)
+    if (!process.env.PORTAL_URL && portal_url) {
+      const host = parsed.hostname;
+      if (host === '169.254.169.254' || host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('172.')) {
+        res.status(400).json({ error: 'portal_url must not point to internal addresses' });
+        return;
+      }
+    }
+    portalBase = parsed.origin;
+  } catch {
+    res.status(400).json({ error: 'Invalid portal_url format' });
     return;
   }
 
