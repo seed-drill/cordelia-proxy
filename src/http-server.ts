@@ -1129,13 +1129,15 @@ app.post('/api/enroll', async (req: Request, res: Response) => {
     return;
   }
 
-  // Normalize and strictly validate user code (alphanumeric only, 8 chars)
-  const normalizedCode = user_code.replace(/-/g, '').toUpperCase();
-  if (!/^[A-Z0-9]{8}$/.test(normalizedCode)) {
+  // Normalize and strictly validate user code (alphanumeric only, 8 chars).
+  // Extract via regex match to produce a clean string that static analyzers
+  // can verify is not user-tainted (only matched characters pass through).
+  const codeMatch = user_code.replace(/-/g, '').toUpperCase().match(/^([A-Z0-9]{4})([A-Z0-9]{4})$/);
+  if (!codeMatch) {
     res.status(400).json({ error: 'Invalid user_code format. Expected 8 alphanumeric characters (e.g. ABCD-EFGH)' });
     return;
   }
-  const formattedCode = `${normalizedCode.slice(0, 4)}-${normalizedCode.slice(4)}`;
+  const formattedCode = `${codeMatch[1]}-${codeMatch[2]}`;
 
   // Validate portal URL to prevent SSRF -- only allow http(s) URLs
   const rawPortalUrl = portal_url?.replace(/\/$/, '') || process.env.PORTAL_URL;
