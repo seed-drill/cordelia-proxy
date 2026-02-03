@@ -1148,7 +1148,7 @@ function validatePortalUrl(portalUrl: string | undefined, envPortalUrl: string |
 }
 
 type PollResult =
-  | { authorized: true; accessToken: string; entityId: string }
+  | { authorized: true; accessToken: string; entityId: string; deviceId: string }
   | { authorized: false; error?: { status: number; body: { error: string; detail: string } } };
 
 async function pollForAuthorization(
@@ -1180,6 +1180,7 @@ async function pollForAuthorization(
       status: string;
       access_token?: string;
       entity_id?: string;
+      device_id?: string;
       interval?: number;
     };
 
@@ -1193,6 +1194,7 @@ async function pollForAuthorization(
         authorized: true,
         accessToken: pollData.access_token || '',
         entityId: pollData.entity_id || '',
+        deviceId: pollData.device_id || '',
       };
     }
 
@@ -1202,8 +1204,7 @@ async function pollForAuthorization(
   return { authorized: false };
 }
 
-async function registerDeviceWithNode(accessToken: string, entityId: string): Promise<string> {
-  let deviceId = `device-${crypto.randomBytes(8).toString('hex')}`;
+async function registerDeviceWithNode(accessToken: string, entityId: string, deviceId: string): Promise<string> {
   const hostname = (await import('os')).hostname();
 
   if (!CORDELIA_CORE_API) return deviceId;
@@ -1304,8 +1305,10 @@ app.post('/api/enroll', async (req: Request, res: Response) => {
       return;
     }
 
-    const { accessToken, entityId } = pollResult;
-    const deviceId = await registerDeviceWithNode(accessToken, entityId);
+    const { accessToken, entityId, deviceId: portalDeviceId } = pollResult;
+    // Use device_id from portal (source of truth); fall back to local generation
+    const deviceId = portalDeviceId || `device-${crypto.randomBytes(8).toString('hex')}`;
+    await registerDeviceWithNode(accessToken, entityId, deviceId);
     await storeEnrollmentTokens(accessToken, entityId);
 
     res.json({
