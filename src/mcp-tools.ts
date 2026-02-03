@@ -158,6 +158,31 @@ async function appendAudit(entries: AuditEntry[]): Promise<void> {
   }
 }
 
+function buildNewContext(
+  current: L1HotContext,
+  operation: 'patch' | 'replace',
+  data: Record<string, unknown>,
+  newUpdatedAt: string,
+): L1HotContext | { error: string } {
+  if (operation === 'replace') {
+    const replaceUpdatedAt = typeof data.updated_at === 'string' ? data.updated_at : newUpdatedAt;
+    const merged = { ...data, version: 1, updated_at: replaceUpdatedAt };
+    try {
+      return L1HotContextSchema.parse(merged);
+    } catch (e) {
+      return { error: `validation_failed: ${(e as Error).message}` };
+    }
+  }
+
+  const merged = deepMerge(current as unknown as Record<string, unknown>, data);
+  merged.updated_at = newUpdatedAt;
+  try {
+    return L1HotContextSchema.parse(merged);
+  } catch (e) {
+    return { error: `validation_failed: ${(e as Error).message}` };
+  }
+}
+
 async function writeHotContext(
   userId: string,
   operation: 'patch' | 'replace',
@@ -186,27 +211,13 @@ async function writeHotContext(
   }
 
   const newUpdatedAt = new Date().toISOString();
-  let newContext: L1HotContext;
+  const contextResult = buildNewContext(current, operation, data, newUpdatedAt);
 
-  if (operation === 'replace') {
-    // For replace, honour the caller's updated_at if provided (hooks compute
-    // chain hashes against their own timestamp). Fall back to server time.
-    const replaceUpdatedAt = typeof data.updated_at === 'string' ? data.updated_at : newUpdatedAt;
-    const merged = { ...data, version: 1, updated_at: replaceUpdatedAt };
-    try {
-      newContext = L1HotContextSchema.parse(merged);
-    } catch (e) {
-      return { error: `validation_failed: ${(e as Error).message}` };
-    }
-  } else {
-    const merged = deepMerge(current as unknown as Record<string, unknown>, data);
-    merged.updated_at = newUpdatedAt;
-    try {
-      newContext = L1HotContextSchema.parse(merged);
-    } catch (e) {
-      return { error: `validation_failed: ${(e as Error).message}` };
-    }
+  if ('error' in contextResult) {
+    return contextResult;
   }
+
+  const newContext = contextResult;
 
   // L1 budget enforcement: reject writes that exceed size limits
   const budgetCheck = checkL1Budget(newContext as unknown as Record<string, unknown>);
@@ -223,9 +234,6 @@ async function writeHotContext(
   }
 
   // Recompute chain hash after any content change (patch or replace).
-  // Patch callers (e.g. /persist, memory_write_hot from Claude) don't include
-  // the integrity block, so the chain_hash becomes stale when content changes.
-  // Recomputing here ensures the chain is always valid for verification.
   if (operation === 'patch' && newContext.ephemeral?.integrity) {
     const contentHash = computeContentHash(newContext as unknown as Record<string, unknown>);
     newContext.ephemeral.integrity.chain_hash = computeChainHash(

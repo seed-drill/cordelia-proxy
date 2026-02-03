@@ -1109,6 +1109,158 @@ app.get('/api/admin/users', async (req: Request, res: Response) => {
 // Device Enrollment (RFC 8628 client-side polling)
 // =============================================================================
 
+type ValidationOk = { value: string };
+type ValidationErr = { error: string; status: number };
+type ValidationResult = ValidationOk | ValidationErr;
+
+function validateUserCode(userCode: unknown): ValidationResult {
+  if (!userCode || typeof userCode !== 'string') {
+    return { error: 'user_code required (e.g. "ABCD-EFGH")', status: 400 };
+  }
+  const codeMatch = userCode.replace(/-/g, '').toUpperCase().match(/^([A-Z0-9]{4})([A-Z0-9]{4})$/);
+  if (!codeMatch) {
+    return { error: 'Invalid user_code format. Expected 8 alphanumeric characters (e.g. ABCD-EFGH)', status: 400 };
+  }
+  return { value: `${codeMatch[1]}-${codeMatch[2]}` };
+}
+
+function validatePortalUrl(portalUrl: string | undefined, envPortalUrl: string | undefined): ValidationResult {
+  const rawPortalUrl = portalUrl?.replace(/\/$/, '') || envPortalUrl;
+  if (!rawPortalUrl) {
+    return { error: 'portal_url required (or set PORTAL_URL env)', status: 400 };
+  }
+
+  try {
+    const parsed = new URL(rawPortalUrl);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return { error: 'portal_url must use http or https', status: 400 };
+    }
+    if (!envPortalUrl && portalUrl) {
+      const host = parsed.hostname;
+      if (host === '169.254.169.254' || host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('172.')) {
+        return { error: 'portal_url must not point to internal addresses', status: 400 };
+      }
+    }
+    return { value: parsed.origin };
+  } catch {
+    return { error: 'Invalid portal_url format', status: 400 };
+  }
+}
+
+type PollResult =
+  | { authorized: true; accessToken: string; entityId: string }
+  | { authorized: false; error?: { status: number; body: { error: string; detail: string } } };
+
+async function pollForAuthorization(
+  pollUrl: string,
+  pollIntervalMs: number,
+  maxDurationMs: number,
+): Promise<PollResult> {
+  const startTime = Date.now();
+
+  while ((Date.now() - startTime) < maxDurationMs) {
+    const pollResp = await fetch(pollUrl);
+
+    if (!pollResp.ok) {
+      const errBody = await pollResp.json().catch(() => ({ error: 'unknown' })) as { error?: string; detail?: string };
+      if (errBody.error === 'expired_token') {
+        return { authorized: false, error: { status: 410, body: { error: 'expired', detail: 'Enrollment code has expired' } } };
+      }
+      if (errBody.error === 'access_denied') {
+        return { authorized: false, error: { status: 403, body: { error: 'denied', detail: 'Enrollment was denied by the portal admin' } } };
+      }
+      if (errBody.error === 'invalid_user_code') {
+        return { authorized: false, error: { status: 404, body: { error: 'invalid_code', detail: 'User code not found on portal' } } };
+      }
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+      continue;
+    }
+
+    const pollData = await pollResp.json() as {
+      status: string;
+      access_token?: string;
+      entity_id?: string;
+      interval?: number;
+    };
+
+    if (pollData.status === 'authorization_pending') {
+      await new Promise(r => setTimeout(r, (pollData.interval ?? 5) * 1000));
+      continue;
+    }
+
+    if (pollData.status === 'authorized') {
+      return {
+        authorized: true,
+        accessToken: pollData.access_token || '',
+        entityId: pollData.entity_id || '',
+      };
+    }
+
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+  }
+
+  return { authorized: false };
+}
+
+async function registerDeviceWithNode(accessToken: string, entityId: string): Promise<string> {
+  let deviceId = `device-${crypto.randomBytes(8).toString('hex')}`;
+  const hostname = (await import('os')).hostname();
+
+  if (!CORDELIA_CORE_API) return deviceId;
+
+  try {
+    const fs = await import('fs/promises');
+    let bearerToken = process.env.CORDELIA_NODE_TOKEN || '';
+    if (!bearerToken) {
+      try {
+        bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
+      } catch {
+        // Token file may not exist yet
+      }
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(accessToken).digest('hex');
+    const registerResp = await fetch(`${CORDELIA_CORE_API}/api/v1/devices/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+      },
+      body: JSON.stringify({
+        device_id: deviceId,
+        entity_id: entityId,
+        device_name: hostname,
+        device_type: 'node',
+        auth_token_hash: tokenHash,
+      }),
+    });
+
+    if (registerResp.ok) {
+      const regData = await registerResp.json() as { device_id?: string };
+      if (regData.device_id) deviceId = regData.device_id;
+    } else {
+      console.error('Device registration with core node failed:', registerResp.status);
+    }
+  } catch (err) {
+    console.error('Device registration error:', (err as Error).message);
+  }
+
+  return deviceId;
+}
+
+async function storeEnrollmentTokens(accessToken: string, entityId: string): Promise<void> {
+  try {
+    const fs = await import('fs/promises');
+    const os = await import('os');
+    const tokenDir = process.env.CORDELIA_HOME || `${os.homedir()}/.cordelia`;
+    await fs.mkdir(tokenDir, { recursive: true });
+    await fs.writeFile(`${tokenDir}/portal-token`, accessToken, { mode: 0o600 });
+    await fs.writeFile(`${tokenDir}/entity-id`, entityId, { mode: 0o600 });
+  } catch (err) {
+    console.error('Failed to store portal token:', (err as Error).message);
+  }
+}
+
 /**
  * POST /api/enroll - Enroll this device using a user code from the portal.
  *
@@ -1124,166 +1276,37 @@ app.get('/api/admin/users', async (req: Request, res: Response) => {
 app.post('/api/enroll', async (req: Request, res: Response) => {
   const { user_code, portal_url } = req.body;
 
-  if (!user_code || typeof user_code !== 'string') {
-    res.status(400).json({ error: 'user_code required (e.g. "ABCD-EFGH")' });
+  const codeResult = validateUserCode(user_code);
+  if ('error' in codeResult) {
+    res.status(codeResult.status).json({ error: codeResult.error });
     return;
   }
+  const formattedCode = codeResult.value;
 
-  // Normalize and strictly validate user code (alphanumeric only, 8 chars).
-  // Extract via regex match to produce a clean string that static analyzers
-  // can verify is not user-tainted (only matched characters pass through).
-  const codeMatch = user_code.replace(/-/g, '').toUpperCase().match(/^([A-Z0-9]{4})([A-Z0-9]{4})$/);
-  if (!codeMatch) {
-    res.status(400).json({ error: 'Invalid user_code format. Expected 8 alphanumeric characters (e.g. ABCD-EFGH)' });
+  const portalResult = validatePortalUrl(portal_url, process.env.PORTAL_URL);
+  if ('error' in portalResult) {
+    res.status(portalResult.status).json({ error: portalResult.error });
     return;
   }
-  const formattedCode = `${codeMatch[1]}-${codeMatch[2]}`;
+  const portalBase = portalResult.value;
 
-  // Validate portal URL to prevent SSRF -- only allow http(s) URLs
-  const rawPortalUrl = portal_url?.replace(/\/$/, '') || process.env.PORTAL_URL;
-  if (!rawPortalUrl) {
-    res.status(400).json({ error: 'portal_url required (or set PORTAL_URL env)' });
-    return;
-  }
-
-  let portalBase: string;
-  try {
-    const parsed = new URL(rawPortalUrl);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      res.status(400).json({ error: 'portal_url must use http or https' });
-      return;
-    }
-    // Reject internal/loopback unless PORTAL_URL env is set (trusted config)
-    if (!process.env.PORTAL_URL && portal_url) {
-      const host = parsed.hostname;
-      if (host === '169.254.169.254' || host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('172.')) {
-        res.status(400).json({ error: 'portal_url must not point to internal addresses' });
-        return;
-      }
-    }
-    portalBase = parsed.origin;
-  } catch {
-    res.status(400).json({ error: 'Invalid portal_url format' });
-    return;
-  }
-
-  const POLL_INTERVAL_MS = 5_000;
-  const MAX_POLL_DURATION_MS = 15 * 60 * 1000; // 15 minutes
-  const startTime = Date.now();
+  const safePollUrl = new URL(`/api/enroll/poll-user/${encodeURIComponent(formattedCode)}`, portalBase); // NOSONAR: formattedCode is validated as ^[A-Z0-9]{4}-[A-Z0-9]{4}$
 
   try {
-    // Poll portal for authorization
-    let authorized = false;
-    let accessToken = '';
-    let entityId = '';
+    const pollResult = await pollForAuthorization(safePollUrl.href, 5_000, 15 * 60 * 1000);
 
-    // Build poll URL once using URL constructor (safe from path injection)
-    const safePollUrl = new URL(`/api/enroll/poll-user/${encodeURIComponent(formattedCode)}`, portalBase); // NOSONAR: formattedCode is validated as ^[A-Z0-9]{4}-[A-Z0-9]{4}$
-
-    while (!authorized && (Date.now() - startTime) < MAX_POLL_DURATION_MS) {
-      const pollResp = await fetch(safePollUrl.href);
-
-      if (!pollResp.ok) {
-        const errBody = await pollResp.json().catch(() => ({ error: 'unknown' })) as { error?: string; detail?: string };
-        if (errBody.error === 'expired_token') {
-          res.status(410).json({ error: 'expired', detail: 'Enrollment code has expired' });
-          return;
-        }
-        if (errBody.error === 'access_denied') {
-          res.status(403).json({ error: 'denied', detail: 'Enrollment was denied by the portal admin' });
-          return;
-        }
-        if (errBody.error === 'invalid_user_code') {
-          res.status(404).json({ error: 'invalid_code', detail: 'User code not found on portal' });
-          return;
-        }
-        // Other errors: continue polling
-        await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
-        continue;
+    if (!pollResult.authorized) {
+      if (pollResult.error) {
+        res.status(pollResult.error.status).json(pollResult.error.body);
+      } else {
+        res.status(408).json({ error: 'timeout', detail: 'Enrollment timed out (15 minutes)' });
       }
-
-      const pollData = await pollResp.json() as {
-        status: string;
-        access_token?: string;
-        entity_id?: string;
-        interval?: number;
-      };
-
-      if (pollData.status === 'authorization_pending') {
-        await new Promise(r => setTimeout(r, (pollData.interval ?? 5) * 1000));
-        continue;
-      }
-
-      if (pollData.status === 'authorized') {
-        authorized = true;
-        accessToken = pollData.access_token || '';
-        entityId = pollData.entity_id || '';
-        break;
-      }
-
-      // Unknown status: wait and retry
-      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
-    }
-
-    if (!authorized) {
-      res.status(408).json({ error: 'timeout', detail: 'Enrollment timed out (15 minutes)' });
       return;
     }
 
-    // Register device with Rust node (if core API is configured)
-    let deviceId = `device-${crypto.randomBytes(8).toString('hex')}`;
-    const hostname = (await import('os')).hostname();
-
-    if (CORDELIA_CORE_API) {
-      try {
-        const fs = await import('fs/promises');
-        let bearerToken = process.env.CORDELIA_NODE_TOKEN || '';
-        if (!bearerToken) {
-          try {
-            bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
-          } catch {
-            // Token file may not exist yet
-          }
-        }
-
-        const tokenHash = crypto.createHash('sha256').update(accessToken).digest('hex');
-        const registerResp = await fetch(`${CORDELIA_CORE_API}/api/v1/devices/register`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
-          },
-          body: JSON.stringify({
-            device_id: deviceId,
-            entity_id: entityId,
-            device_name: hostname,
-            device_type: 'node',
-            auth_token_hash: tokenHash,
-          }),
-        });
-
-        if (registerResp.ok) {
-          const regData = await registerResp.json() as { device_id?: string };
-          if (regData.device_id) deviceId = regData.device_id;
-        } else {
-          console.error('Device registration with core node failed:', registerResp.status);
-        }
-      } catch (err) {
-        console.error('Device registration error:', (err as Error).message);
-      }
-    }
-
-    // Store the bearer token locally
-    try {
-      const fs = await import('fs/promises');
-      const os = await import('os');
-      const tokenDir = process.env.CORDELIA_HOME || `${os.homedir()}/.cordelia`;
-      await fs.mkdir(tokenDir, { recursive: true });
-      await fs.writeFile(`${tokenDir}/portal-token`, accessToken, { mode: 0o600 });
-      await fs.writeFile(`${tokenDir}/entity-id`, entityId, { mode: 0o600 });
-    } catch (err) {
-      console.error('Failed to store portal token:', (err as Error).message);
-    }
+    const { accessToken, entityId } = pollResult;
+    const deviceId = await registerDeviceWithNode(accessToken, entityId);
+    await storeEnrollmentTokens(accessToken, entityId);
 
     res.json({
       status: 'enrolled',

@@ -134,6 +134,22 @@ export class NodeBridge {
     });
   }
 
+  private async syncGroupMembers(client: NodeClient, groupId: string, storage: StorageProvider): Promise<void> {
+    const remote = await client.readGroup(groupId);
+    if (!remote) return;
+
+    for (const member of remote.members) {
+      try {
+        const existing = await storage.getMembership(groupId, member.entity_id);
+        if (!existing) {
+          await storage.addMember(groupId, member.entity_id, member.role);
+        }
+      } catch {
+        // FK constraint: entity_id not in local l1_hot -- skip silently
+      }
+    }
+  }
+
   /**
    * Sync groups from the P2P network into local storage.
    * Creates locally any groups that exist on the network but not locally.
@@ -159,19 +175,7 @@ export class NodeBridge {
 
       // Sync members (best-effort, FK on l1_hot may prevent adding remote users)
       try {
-        const remote = await client.readGroup(rg.id);
-        if (remote) {
-          for (const member of remote.members) {
-            try {
-              const existing = await storage.getMembership(rg.id, member.entity_id);
-              if (!existing) {
-                await storage.addMember(rg.id, member.entity_id, member.role);
-              }
-            } catch {
-              // FK constraint: entity_id not in local l1_hot -- skip silently
-            }
-          }
-        }
+        await this.syncGroupMembers(client, rg.id, storage);
       } catch {
         // Group read failed -- skip member sync
       }
@@ -275,6 +279,23 @@ export class NodeBridge {
     return 'synced';
   }
 
+  private async processSyncItemSafe(
+    client: NodeClient,
+    header: { item_id: string; is_deletion?: boolean; updated_at: string },
+    groupId: string,
+    storage: StorageProvider,
+  ): Promise<'synced' | 'skipped' | 'error'> {
+    try {
+      return await this.processSyncItem(client, header, groupId, storage);
+    } catch (e) {
+      if (e instanceof NodeClientError && e.status === 404) {
+        return 'skipped';
+      }
+      console.error(`Cordelia: failed to sync item ${header.item_id}: ${(e as Error).message}`);
+      return 'error';
+    }
+  }
+
   /**
    * Sync items for a single group.
    */
@@ -292,19 +313,10 @@ export class NodeBridge {
     const headers = await client.listGroupItems(groupId, since, 200);
 
     for (const header of headers) {
-      try {
-        const result = await this.processSyncItem(client, header, groupId, storage);
-        if (result === 'synced') synced++;
-        else if (result === 'skipped') skipped++;
-        else errors++;
-      } catch (e) {
-        if (e instanceof NodeClientError && e.status === 404) {
-          skipped++;
-        } else {
-          console.error(`Cordelia: failed to sync item ${header.item_id}: ${(e as Error).message}`);
-          errors++;
-        }
-      }
+      const result = await this.processSyncItemSafe(client, header, groupId, storage);
+      if (result === 'synced') synced++;
+      else if (result === 'skipped') skipped++;
+      else errors++;
     }
 
     if (sqliteStorage && headers.length > 0) {

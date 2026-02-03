@@ -529,6 +529,32 @@ function buildDiagnostics(
 }
 
 /**
+ * Return results with optional diagnostics wrapper.
+ */
+function wrapSearchResults(
+  results: SearchResult[],
+  debug: boolean,
+  diagnostics: Partial<SearchDiagnostics>,
+): SearchResult[] | { results: SearchResult[]; diagnostics: SearchDiagnostics } {
+  if (debug) {
+    return {
+      results,
+      diagnostics: {
+        search_path: 'sql',
+        vec_available: diagnostics.vec_available ?? false,
+        vec_used: diagnostics.vec_used ?? false,
+        query_embedding_generated: diagnostics.query_embedding_generated ?? false,
+        fts_candidates: diagnostics.fts_candidates ?? 0,
+        vec_candidates: diagnostics.vec_candidates ?? 0,
+        blob_index_entries: diagnostics.blob_index_entries ?? 0,
+        results: diagnostics.results ?? [],
+      },
+    };
+  }
+  return results;
+}
+
+/**
  * Search implementation: FTS5 BM25 + optional sqlite-vec cosine similarity.
  * 70/30 dominant-signal hybrid weighting when both are available.
  * For JSON/non-SQLite providers, FTS/vec return empty — degrades to blob index listing.
@@ -543,22 +569,15 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
     const results = await searchWithoutQuery(ctx, options, index);
     for (const r of results) await ctx.storage.recordAccess(r.id);
 
-    if (debug) {
-      return {
-        results,
-        diagnostics: {
-          search_path: 'sql',
-          vec_available: ctx.storage.vecAvailable(),
-          vec_used: false,
-          query_embedding_generated: false,
-          fts_candidates: 0,
-          vec_candidates: 0,
-          blob_index_entries: ctx.indexEntryCount,
-          results: results.map((r) => ({ id: r.id, fts_score: 0, vec_score: 0, combined_score: 1 })),
-        },
-      };
-    }
-    return results;
+    return wrapSearchResults(results, debug, {
+      vec_available: ctx.storage.vecAvailable(),
+      vec_used: false,
+      query_embedding_generated: false,
+      fts_candidates: 0,
+      vec_candidates: 0,
+      blob_index_entries: ctx.indexEntryCount,
+      results: results.map((r) => ({ id: r.id, fts_score: 0, vec_score: 0, combined_score: 1 })),
+    });
   }
 
   // Perform FTS and vector searches
@@ -608,23 +627,18 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
 
   for (const r of finalResults) await ctx.storage.recordAccess(r.id);
 
-  if (debug) {
-    return {
-      results: finalResults,
-      diagnostics: buildDiagnostics(
-        finalResults,
-        debugScores,
-        ctx.storage.vecAvailable(),
-        useVec,
-        queryEmbeddingGenerated,
-        ftsScores.size,
-        vecScores.size,
-        ctx.indexEntryCount,
-      ),
-    };
-  }
-
-  return finalResults;
+  return wrapSearchResults(finalResults, debug, {
+    ...buildDiagnostics(
+      finalResults,
+      debugScores,
+      ctx.storage.vecAvailable(),
+      useVec,
+      queryEmbeddingGenerated,
+      ftsScores.size,
+      vecScores.size,
+      ctx.indexEntryCount,
+    ),
+  });
 }
 
 export interface SearchOptionsWithDebug extends SearchOptions {
@@ -799,6 +813,91 @@ export interface WriteItemOptions {
   domain?: MemoryDomain;
 }
 
+/**
+ * Encrypt item content using group PSK, personal key, or plaintext.
+ */
+async function encryptItemContent(validated: L2Item, groupId?: string): Promise<string> {
+  if (groupId) {
+    const { getGroupKey, groupEncrypt } = await import('./group-keys.js');
+    const groupKey = await getGroupKey(groupId);
+    if (groupKey) {
+      const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
+      const encrypted = await groupEncrypt(plaintext, groupKey);
+      return JSON.stringify(encrypted, null, 2);
+    }
+    console.error(`Cordelia: no PSK for group ${groupId}, storing unencrypted`);
+    return JSON.stringify(validated, null, 2);
+  }
+
+  const cryptoProvider = getDefaultCryptoProvider();
+  if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
+    const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
+    const encrypted = await cryptoProvider.encrypt(plaintext);
+    return JSON.stringify(encrypted, null, 2);
+  }
+
+  return JSON.stringify(validated, null, 2);
+}
+
+/**
+ * Update blob index, FTS5, and vec tables for an item.
+ */
+async function updateItemIndex(
+  id: string,
+  type: L2ItemType,
+  validated: L2Item,
+  relativePath: string,
+  options: WriteItemOptions,
+  domain: MemoryDomain,
+  subtype?: string,
+): Promise<void> {
+  const storage = getStorageProvider();
+  const index = await loadIndex();
+  const existingIdx = index.entries.findIndex((e) => e.id === id);
+
+  const name = extractName(type, validated);
+  const tags = (validated as { tags?: string[] }).tags || [];
+  const keywordSources = buildKeywordSources(validated, name);
+  const lowerTags = tags.map((t) => t.toLowerCase());
+
+  // Generate embedding
+  let embedding: number[] | undefined;
+  const provider = getDefaultProvider();
+  if (provider.dimensions() > 0) {
+    const embeddableText = buildEmbeddableText(validated, name, tags);
+    const cached = await getCachedEmbedding(embeddableText, provider);
+    if (cached) embedding = cached;
+  }
+
+  const indexEntry: L2IndexEntry = {
+    id,
+    type,
+    subtype,
+    name,
+    tags: lowerTags,
+    keywords: extractKeywords(keywordSources),
+    path: relativePath,
+    embedding,
+    visibility: options.group_id ? 'group' : 'private',
+    domain,
+  };
+
+  if (existingIdx >= 0) {
+    index.entries[existingIdx] = indexEntry;
+  } else {
+    index.entries.push(indexEntry);
+  }
+
+  await saveIndex(index);
+
+  // Update FTS5 and vec tables (no-op for JSON provider)
+  await storage.ftsUpsert(id, name, keywordSources, lowerTags.join(' '));
+
+  if (embedding && storage.vecAvailable()) {
+    await storage.vecUpsert(id, toFloat32Array(embedding));
+  }
+}
+
 export async function writeItem(
   type: L2ItemType,
   data: Partial<L2Item>,
@@ -850,29 +949,7 @@ export async function writeItem(
   const relativePath = `${subdir}/${id}.json`;
 
   // Encrypt: group items use group PSK, private items use proxy personal key
-  const cryptoProvider = getDefaultCryptoProvider();
-  let fileContent: string;
-
-  if (options.group_id) {
-    // Group items encrypted with group PSK for cross-user sharing
-    const { getGroupKey, groupEncrypt } = await import('./group-keys.js');
-    const groupKey = await getGroupKey(options.group_id);
-    if (groupKey) {
-      const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
-      const encrypted = await groupEncrypt(plaintext, groupKey);
-      fileContent = JSON.stringify(encrypted, null, 2);
-    } else {
-      // No group key available -- store plaintext (local-only, won't be shareable)
-      console.error(`Cordelia: no PSK for group ${options.group_id}, storing unencrypted`);
-      fileContent = JSON.stringify(validated, null, 2);
-    }
-  } else if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
-    const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
-    const encrypted = await cryptoProvider.encrypt(plaintext);
-    fileContent = JSON.stringify(encrypted, null, 2);
-  } else {
-    fileContent = JSON.stringify(validated, null, 2);
-  }
+  const fileContent = await encryptItemContent(validated, options.group_id);
 
   // Determine domain (metadata -- always set regardless of visibility)
   const domain: MemoryDomain = options.domain || inferDomainFromType(type, subtype);
@@ -907,51 +984,8 @@ export async function writeItem(
   };
   await storage.writeL2Item(id, type, Buffer.from(fileContent, 'utf-8'), meta);
 
-  // Update blob index
-  const index = await loadIndex();
-  const existingIdx = index.entries.findIndex((e) => e.id === id);
-
-  const name = extractName(type, validated);
-  const tags = (validated as { tags?: string[] }).tags || [];
-  const keywordSources = buildKeywordSources(validated, name);
-  const lowerTags = tags.map((t) => t.toLowerCase());
-
-  // Generate embedding
-  let embedding: number[] | undefined;
-  const provider = getDefaultProvider();
-  if (provider.dimensions() > 0) {
-    const embeddableText = buildEmbeddableText(validated, name, tags);
-    const cached = await getCachedEmbedding(embeddableText, provider);
-    if (cached) embedding = cached;
-  }
-
-  const indexEntry: L2IndexEntry = {
-    id,
-    type,
-    subtype,
-    name,
-    tags: lowerTags,
-    keywords: extractKeywords(keywordSources),
-    path: relativePath,
-    embedding,
-    visibility: options.group_id ? 'group' : 'private',
-    domain,
-  };
-
-  if (existingIdx >= 0) {
-    index.entries[existingIdx] = indexEntry;
-  } else {
-    index.entries.push(indexEntry);
-  }
-
-  await saveIndex(index);
-
-  // Update FTS5 and vec tables (no-op for JSON provider)
-  await storage.ftsUpsert(id, name, keywordSources, lowerTags.join(' '));
-
-  if (embedding && storage.vecAvailable()) {
-    await storage.vecUpsert(id, toFloat32Array(embedding));
-  }
+  // Update blob index, FTS5, and vec tables
+  await updateItemIndex(id, type, validated, relativePath, options, domain, subtype);
 
   // Push group items to Rust node for P2P replication
   if (options.group_id) {
@@ -997,28 +1031,24 @@ export async function deleteItem(id: string): Promise<{ success: true; id: strin
 }
 
 /**
- * Share a private memory to a group (COW copy).
- * The original is never modified. A new row is created with parent_id pointing to the original.
+ * Check share policy: ownership, membership, role, and posture.
+ * Returns an error object if sharing is not allowed, or null if allowed.
  */
-export async function shareItem(
+async function checkSharePolicy(
   itemId: string,
-  targetGroup: string,
   entityId: string,
-): Promise<{ success: true; copy_id: string } | { error: string }> {
-  const storage = getStorageProvider();
-
-  // Read original item metadata
+  targetGroup: string,
+  storage: ReturnType<typeof getStorageProvider>,
+): Promise<{ error: string } | null> {
   const meta = await storage.readL2ItemMeta(itemId);
   if (!meta) {
     return { error: 'not_found' };
   }
 
-  // Policy check: entity must be the owner of the item
   if (meta.owner_id !== entityId) {
     return { error: 'not_owner' };
   }
 
-  // Policy check: entity must be a member of the target group (non-viewer, non-EMCON)
   const membership = await storage.getMembership(targetGroup, entityId);
   if (!membership) {
     return { error: 'not_member' };
@@ -1030,15 +1060,18 @@ export async function shareItem(
     return { error: 'emcon_blocks_share' };
   }
 
-  // Read original data
-  const original = await storage.readL2Item(itemId);
-  if (!original) {
-    return { error: 'not_found' };
-  }
+  return null;
+}
 
-  // Decrypt original data (may be encrypted with proxy personal key)
+/**
+ * Decrypt original data then re-encrypt with group PSK.
+ */
+async function reencryptForGroup(
+  originalData: Buffer,
+  targetGroup: string,
+): Promise<{ data: Buffer; keyVersion: number } | { error: string }> {
   let plainData: Buffer;
-  const parsed = JSON.parse(original.data.toString('utf-8'));
+  const parsed = JSON.parse(originalData.toString('utf-8'));
   if (isEncryptedPayload(parsed)) {
     const cryptoProvider = getDefaultCryptoProvider();
     if (!cryptoProvider.isUnlocked()) {
@@ -1046,21 +1079,53 @@ export async function shareItem(
     }
     plainData = await cryptoProvider.decrypt(parsed as EncryptedPayload);
   } else {
-    plainData = original.data;
+    plainData = originalData;
   }
 
-  // Re-encrypt with group PSK for cross-user sharing
   const { getGroupKey, groupEncrypt } = await import('./group-keys.js');
   const groupKey = await getGroupKey(targetGroup);
-  let cowFileContent: Buffer;
-  let cowKeyVersion = 1;
   if (groupKey) {
     const encrypted = await groupEncrypt(plainData, groupKey);
-    cowFileContent = Buffer.from(JSON.stringify(encrypted, null, 2), 'utf-8');
-    cowKeyVersion = 2;
-  } else {
-    cowFileContent = plainData; // No PSK, store as-is
+    return { data: Buffer.from(JSON.stringify(encrypted, null, 2), 'utf-8'), keyVersion: 2 };
   }
+  return { data: plainData, keyVersion: 1 };
+}
+
+/**
+ * Share a private memory to a group (COW copy).
+ * The original is never modified. A new row is created with parent_id pointing to the original.
+ */
+export async function shareItem(
+  itemId: string,
+  targetGroup: string,
+  entityId: string,
+): Promise<{ success: true; copy_id: string } | { error: string }> {
+  const storage = getStorageProvider();
+
+  // Policy checks
+  const policyError = await checkSharePolicy(itemId, entityId, targetGroup, storage);
+  if (policyError) {
+    return policyError;
+  }
+
+  const meta = await storage.readL2ItemMeta(itemId);
+  if (!meta) {
+    return { error: 'not_found' };
+  }
+
+  // Read original data
+  const original = await storage.readL2Item(itemId);
+  if (!original) {
+    return { error: 'not_found' };
+  }
+
+  // Decrypt and re-encrypt for group
+  const reencrypted = await reencryptForGroup(original.data, targetGroup);
+  if ('error' in reencrypted) {
+    return reencrypted;
+  }
+  const cowFileContent = reencrypted.data;
+  const cowKeyVersion = reencrypted.keyVersion;
 
   // Generate new ID for COW copy
   const copyId = generateId();
@@ -1070,7 +1135,7 @@ export async function shareItem(
   // Write COW copy
   const cowMeta = {
     type: original.type as 'entity' | 'session' | 'learning',
-    owner_id: meta.owner_id,
+    owner_id: meta.owner_id || undefined,
     author_id: entityId,
     visibility: 'group' as const,
     group_id: targetGroup,
@@ -1180,33 +1245,11 @@ export async function prefetchItems(
 }
 
 /**
- * Sweep expired items using three eviction strategies:
- * 1. Interrupt TTL sweep: delete items with expired ttl_expires_at
- * 2. Procedural cap-based eviction: evict least-used items exceeding PROCEDURAL_CAP
- * 3. Legacy group culture TTL: preserved for backwards compatibility
+ * Sweep legacy group culture TTL items.
+ * Returns count of swept items.
  */
-export async function sweepExpiredItems(): Promise<{ swept: number }> {
-  const storage = getStorageProvider();
-  if (storage.name !== 'sqlite') return { swept: 0 };
-
+async function sweepLegacyGroupTtl(storage: ReturnType<typeof getStorageProvider>): Promise<number> {
   let swept = 0;
-  const now = new Date().toISOString();
-
-  // 1. Interrupt TTL sweep
-  const expired = await storage.getExpiredItems(now);
-  for (const item of expired) {
-    await deleteItem(item.id);
-    swept++;
-  }
-
-  // 2. Procedural cap-based eviction
-  const evictable = await storage.getEvictableProceduralItems(PROCEDURAL_CAP);
-  for (const id of evictable) {
-    await deleteItem(id);
-    swept++;
-  }
-
-  // 3. Legacy group culture TTL (for items without domain-based TTL)
   const groups = await storage.listGroups();
   for (const group of groups) {
     let culture: { ttl_default?: number | null } = {};
@@ -1240,8 +1283,95 @@ export async function sweepExpiredItems(): Promise<{ swept: number }> {
       }
     }
   }
+  return swept;
+}
+
+/**
+ * Sweep expired items using three eviction strategies:
+ * 1. Interrupt TTL sweep: delete items with expired ttl_expires_at
+ * 2. Procedural cap-based eviction: evict least-used items exceeding PROCEDURAL_CAP
+ * 3. Legacy group culture TTL: preserved for backwards compatibility
+ */
+export async function sweepExpiredItems(): Promise<{ swept: number }> {
+  const storage = getStorageProvider();
+  if (storage.name !== 'sqlite') return { swept: 0 };
+
+  let swept = 0;
+  const now = new Date().toISOString();
+
+  // 1. Interrupt TTL sweep
+  const expired = await storage.getExpiredItems(now);
+  for (const item of expired) {
+    await deleteItem(item.id);
+    swept++;
+  }
+
+  // 2. Procedural cap-based eviction
+  const evictable = await storage.getEvictableProceduralItems(PROCEDURAL_CAP);
+  for (const id of evictable) {
+    await deleteItem(id);
+    swept++;
+  }
+
+  // 3. Legacy group culture TTL (for items without domain-based TTL)
+  swept += await sweepLegacyGroupTtl(storage);
 
   return { swept };
+}
+
+/**
+ * Process a single item for domain reclassification.
+ * Returns a change record if reclassified, or 'skipped' if no action needed.
+ */
+async function reclassifyItem(
+  entry: { id: string; type: string },
+  storage: ReturnType<typeof getStorageProvider>,
+  sqliteStorage: SqliteStorageProvider,
+): Promise<{ change: { id: string; from: string; to: string; reason: string } } | 'skipped'> {
+  const meta = await storage.readL2ItemMeta(entry.id);
+  if (!meta) {
+    return 'skipped';
+  }
+
+  const currentDomain = meta.domain || 'unclassified';
+
+  const item = await readItem(entry.id);
+  if (!item) {
+    return 'skipped';
+  }
+
+  let subtype: string | undefined;
+  if (entry.type === 'learning') {
+    subtype = (item as L2Learning).type;
+  } else if (entry.type === 'entity') {
+    subtype = (item as L2Entity).type;
+  }
+
+  const correctDomain = inferDomainFromType(
+    entry.type as 'entity' | 'session' | 'learning',
+    subtype,
+  );
+
+  if (correctDomain === currentDomain) {
+    return 'skipped';
+  }
+
+  const ttl = correctDomain === 'interrupt' && !meta.ttl_expires_at
+    ? computeInterruptTtl()
+    : meta.ttl_expires_at;
+
+  const db = sqliteStorage.getDatabase();
+  db.prepare('UPDATE l2_items SET domain = ?, ttl_expires_at = ? WHERE id = ?')
+    .run(correctDomain, ttl || null, entry.id);
+
+  return {
+    change: {
+      id: entry.id,
+      from: currentDomain,
+      to: correctDomain,
+      reason: `${entry.type}/${subtype || 'none'}`,
+    },
+  };
 }
 
 /**
@@ -1271,51 +1401,11 @@ export async function backfillDomains(): Promise<{
 
   for (const entry of allItems) {
     try {
-      const meta = await storage.readL2ItemMeta(entry.id);
-      if (!meta) {
+      const result = await reclassifyItem(entry, storage, sqliteStorage);
+      if (result === 'skipped') {
         skipped++;
-        continue;
-      }
-
-      const currentDomain = meta.domain || 'unclassified';
-
-      // Read through decryption layer to get actual content
-      const item = await readItem(entry.id);
-      if (!item) {
-        skipped++;
-        continue;
-      }
-
-      // Determine correct domain from actual item data
-      let subtype: string | undefined;
-      if (entry.type === 'learning') {
-        subtype = (item as L2Learning).type;
-      } else if (entry.type === 'entity') {
-        subtype = (item as L2Entity).type;
-      }
-
-      const correctDomain = inferDomainFromType(
-        entry.type as 'entity' | 'session' | 'learning',
-        subtype,
-      );
-
-      if (correctDomain !== currentDomain) {
-        // Compute TTL for interrupt items that don't have one yet
-        const ttl = correctDomain === 'interrupt' && !meta.ttl_expires_at
-          ? computeInterruptTtl()
-          : meta.ttl_expires_at;
-
-        // Update via raw SQL since we only need to change metadata columns
-        const db = sqliteStorage.getDatabase();
-        db.prepare('UPDATE l2_items SET domain = ?, ttl_expires_at = ? WHERE id = ?')
-          .run(correctDomain, ttl || null, entry.id);
-
-        changes.push({
-          id: entry.id,
-          from: currentDomain,
-          to: correctDomain,
-          reason: `${entry.type}/${subtype || 'none'}`,
-        });
+      } else {
+        changes.push(result.change);
         reclassified++;
       }
     } catch (e) {
@@ -1325,6 +1415,55 @@ export async function backfillDomains(): Promise<{
   }
 
   return { total: allItems.length, reclassified, skipped, errors, changes };
+}
+
+/**
+ * Process a single item for vec backfill: rebuild FTS and optionally generate embedding.
+ */
+async function processVecBackfillItem(
+  entry: { id: string; type: string },
+  sqliteStorage: SqliteStorageProvider,
+  provider: EmbeddingProvider,
+  canEmbed: boolean,
+): Promise<'cached' | 'generated' | 'skipped' | 'fts_only' | 'error'> {
+  const item = await readItem(entry.id);
+  if (!item) {
+    return 'skipped';
+  }
+
+  const name = extractName(entry.type as L2ItemType, item);
+  const tags = (item as { tags?: string[] }).tags || [];
+
+  // Rebuild FTS entry with current field extraction (includes details)
+  const keywordSources = buildKeywordSources(item, name);
+  const lowerTags = tags.map((t) => t.toLowerCase());
+  await sqliteStorage.ftsUpsert(entry.id, name, keywordSources, lowerTags.join(' '));
+
+  if (!canEmbed) {
+    return 'fts_only';
+  }
+
+  // Rebuild vec entry
+  const embeddableText = buildEmbeddableText(item, name, tags);
+  const hash = contentHash(embeddableText);
+  const existingCached = await sqliteStorage.getEmbedding(hash, provider.name, provider.modelName());
+
+  let embedding: number[];
+  let result: 'cached' | 'generated';
+  if (existingCached) {
+    embedding = bufferToEmbedding(existingCached);
+    result = 'cached';
+  } else {
+    const gen = await getCachedEmbedding(embeddableText, provider);
+    if (!gen) {
+      return 'skipped';
+    }
+    embedding = gen;
+    result = 'generated';
+  }
+
+  await sqliteStorage.vecUpsert(entry.id, toFloat32Array(embedding));
+  return result;
 }
 
 /**
@@ -1346,9 +1485,8 @@ export async function backfillVec(): Promise<{
   }
 
   const sqliteStorage = storage as SqliteStorageProvider;
-  const vecAvailable = sqliteStorage.vecAvailable();
   const provider = getDefaultProvider();
-  const canEmbed = vecAvailable && provider.dimensions() > 0;
+  const canEmbed = sqliteStorage.vecAvailable() && provider.dimensions() > 0;
 
   // Iterate l2_items directly (not the legacy l2_index blob)
   const allItems = sqliteStorage.listL2ItemIds();
@@ -1360,42 +1498,13 @@ export async function backfillVec(): Promise<{
 
   for (const entry of allItems) {
     try {
-      const item = await readItem(entry.id);
-      if (!item) {
-        skipped++;
-        continue;
-      }
-
-      const name = extractName(entry.type as L2ItemType, item);
-      const tags = (item as { tags?: string[] }).tags || [];
-
-      // Rebuild FTS entry with current field extraction (includes details)
-      const keywordSources = buildKeywordSources(item, name);
-      const lowerTags = tags.map((t) => t.toLowerCase());
-      await sqliteStorage.ftsUpsert(entry.id, name, keywordSources, lowerTags.join(' '));
-      ftsUpdated++;
-
-      // Rebuild vec entry if available
-      if (canEmbed) {
-        const embeddableText = buildEmbeddableText(item, name, tags);
-        const hash = contentHash(embeddableText);
-        const existingCached = await sqliteStorage.getEmbedding(hash, provider.name, provider.modelName());
-
-        let embedding: number[];
-        if (existingCached) {
-          embedding = bufferToEmbedding(existingCached);
-          cached++;
-        } else {
-          const gen = await getCachedEmbedding(embeddableText, provider);
-          if (!gen) {
-            skipped++;
-            continue;
-          }
-          embedding = gen;
-          generated++;
-        }
-
-        await sqliteStorage.vecUpsert(entry.id, toFloat32Array(embedding));
+      const result = await processVecBackfillItem(entry, sqliteStorage, provider, canEmbed);
+      switch (result) {
+        case 'cached': cached++; ftsUpdated++; break;
+        case 'generated': generated++; ftsUpdated++; break;
+        case 'fts_only': ftsUpdated++; break;
+        case 'skipped': skipped++; break;
+        case 'error': errors++; break;
       }
     } catch (e) {
       console.error(`Cordelia: backfill error for ${entry.id}: ${(e as Error).message}`);
@@ -1404,6 +1513,92 @@ export async function backfillVec(): Promise<{
   }
 
   return { total: allItems.length, cached, generated, skipped, errors, fts_updated: ftsUpdated };
+}
+
+/**
+ * Process a single file for index rebuild: read, parse, decrypt, validate,
+ * optionally re-encrypt, extract metadata, and generate embedding.
+ * Returns null on error (file is skipped).
+ */
+async function processFileForIndex(
+  filePath: string,
+  file: string,
+  type: L2ItemType,
+  dir: string,
+  cryptoProvider: ReturnType<typeof getDefaultCryptoProvider>,
+  shouldEncrypt: boolean,
+  storage: ReturnType<typeof getStorageProvider>,
+): Promise<{ entry: L2IndexEntry; encrypted: boolean } | null> {
+  const content = await fs.readFile(filePath, 'utf-8');
+  let parsed = JSON.parse(content);
+  let wasEncrypted = false;
+
+  // Handle encrypted items
+  if (isEncryptedPayload(parsed)) {
+    if (!cryptoProvider.isUnlocked()) {
+      return null;
+    }
+    const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
+    parsed = JSON.parse(decrypted.toString('utf-8'));
+    wasEncrypted = true;
+  }
+
+  // Validate and extract metadata
+  const validated = validateItem(type, parsed);
+  if (!validated) return null;
+
+  let subtype: string | undefined;
+  if (type === 'entity') {
+    subtype = (validated as L2Entity).type;
+  } else if (type === 'learning') {
+    subtype = (validated as L2Learning).type;
+  }
+
+  // Re-encrypt unencrypted items if requested
+  let didEncrypt = false;
+  if (shouldEncrypt && !wasEncrypted) {
+    const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
+    const encrypted = await cryptoProvider.encrypt(plaintext);
+    await fs.writeFile(filePath, JSON.stringify(encrypted, null, 2), 'utf-8');
+    didEncrypt = true;
+  }
+
+  const name = extractName(type, validated);
+  const tags = (validated as { tags?: string[] }).tags || [];
+  const lowerTags = tags.map((t) => t.toLowerCase());
+  const keywordSources = buildKeywordSources(validated, name);
+
+  // Generate/cache embedding
+  let embedding: number[] | undefined;
+  const provider = getDefaultProvider();
+  if (provider.dimensions() > 0) {
+    const embeddableText = buildEmbeddableText(validated, name, tags);
+    const cached = await getCachedEmbedding(embeddableText, provider);
+    if (cached) embedding = cached;
+  }
+
+  const itemId = (validated as { id: string }).id;
+
+  // Populate FTS5 and vec tables
+  await storage.ftsUpsert(itemId, name, keywordSources, lowerTags.join(' '));
+  if (embedding && storage.vecAvailable()) {
+    await storage.vecUpsert(itemId, toFloat32Array(embedding));
+  }
+
+  return {
+    entry: {
+      id: itemId,
+      type,
+      subtype,
+      name,
+      tags: lowerTags,
+      keywords: extractKeywords(keywordSources),
+      path: `${dir}/${file}`,
+      embedding,
+      visibility: 'private',
+    },
+    encrypted: didEncrypt,
+  };
 }
 
 /**
@@ -1434,78 +1629,10 @@ export async function rebuildIndex(options?: { reencrypt?: boolean }): Promise<{
 
         const filePath = path.join(dirPath, file);
         try {
-          const content = await fs.readFile(filePath, 'utf-8');
-          let parsed = JSON.parse(content);
-          let wasEncrypted = false;
-
-          // Handle encrypted items
-          if (isEncryptedPayload(parsed)) {
-            if (!cryptoProvider.isUnlocked()) {
-              continue;
-            }
-            const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
-            parsed = JSON.parse(decrypted.toString('utf-8'));
-            wasEncrypted = true;
-          }
-
-          // Validate and extract metadata
-          let validated: L2Item;
-          let subtype: string | undefined;
-
-          switch (type) {
-            case 'entity':
-              validated = L2EntitySchema.parse(parsed);
-              subtype = (validated as L2Entity).type;
-              break;
-            case 'session':
-              validated = L2SessionSchema.parse(parsed);
-              break;
-            case 'learning':
-              validated = L2LearningSchema.parse(parsed);
-              subtype = (validated as L2Learning).type;
-              break;
-          }
-
-          // Re-encrypt unencrypted items if requested
-          if (shouldEncrypt && !wasEncrypted) {
-            const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
-            const encrypted = await cryptoProvider.encrypt(plaintext);
-            await fs.writeFile(filePath, JSON.stringify(encrypted, null, 2), 'utf-8');
-            encryptedCount++;
-          }
-
-          const name = extractName(type, validated);
-          const tags = (validated as { tags?: string[] }).tags || [];
-          const lowerTags = tags.map((t) => t.toLowerCase());
-          const keywordSources = buildKeywordSources(validated, name);
-
-          // Generate/cache embedding
-          let embedding: number[] | undefined;
-          const provider = getDefaultProvider();
-          if (provider.dimensions() > 0) {
-            const embeddableText = buildEmbeddableText(validated, name, tags);
-            const cached = await getCachedEmbedding(embeddableText, provider);
-            if (cached) embedding = cached;
-          }
-
-          const itemId = (validated as { id: string }).id;
-
-          entries.push({
-            id: itemId,
-            type,
-            subtype,
-            name,
-            tags: lowerTags,
-            keywords: extractKeywords(keywordSources),
-            path: `${dir}/${file}`,
-            embedding,
-            visibility: 'private',
-          });
-
-          // Populate FTS5 and vec tables
-          await storage.ftsUpsert(itemId, name, keywordSources, lowerTags.join(' '));
-          if (embedding && storage.vecAvailable()) {
-            await storage.vecUpsert(itemId, toFloat32Array(embedding));
+          const result = await processFileForIndex(filePath, file, type, dir, cryptoProvider, shouldEncrypt ?? false, storage);
+          if (result) {
+            entries.push(result.entry);
+            if (result.encrypted) encryptedCount++;
           }
         } catch {
           // Skip invalid files

@@ -160,21 +160,21 @@ export class JsonStorageProvider implements StorageProvider {
 
   // -- FTS (no-op for JSON provider) --
 
-  async ftsUpsert(_itemId: string, _name: string, _content: string, _tags: string): Promise<void> {}
-  async ftsDelete(_itemId: string): Promise<void> {}
+  async ftsUpsert(_itemId: string, _name: string, _content: string, _tags: string): Promise<void> { /* no-op: JSON provider has no FTS */ }
+  async ftsDelete(_itemId: string): Promise<void> { /* no-op: JSON provider has no FTS */ }
   async ftsSearch(_query: string, _limit: number): Promise<Array<{ item_id: string; rank: number }>> { return []; }
 
   // -- Vector search (no-op for JSON provider) --
 
-  async vecUpsert(_itemId: string, _embedding: Float32Array): Promise<void> {}
-  async vecDelete(_itemId: string): Promise<void> {}
+  async vecUpsert(_itemId: string, _embedding: Float32Array): Promise<void> { /* no-op: JSON provider has no vec */ }
+  async vecDelete(_itemId: string): Promise<void> { /* no-op: JSON provider has no vec */ }
   async vecSearch(_embedding: Float32Array, _limit: number): Promise<Array<{ item_id: string; distance: number }>> { return []; }
   vecAvailable(): boolean { return false; }
 
   // -- Embedding cache (no-op for JSON provider) --
 
   async getEmbedding(_contentHash: string, _provider: string, _model: string): Promise<Buffer | null> { return null; }
-  async putEmbedding(_contentHash: string, _provider: string, _model: string, _dimensions: number, _vector: Buffer): Promise<void> {}
+  async putEmbedding(_contentHash: string, _provider: string, _model: string, _dimensions: number, _vector: Buffer): Promise<void> { /* no-op: JSON provider has no embedding cache */ }
 
   // -- Groups (not supported for JSON provider) --
 

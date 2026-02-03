@@ -58,6 +58,37 @@ async function initEncryption(): Promise<void> {
   }
 }
 
+async function checkAndBackfillSqlite(sqliteProvider: SqliteStorageProvider): Promise<void> {
+  const vecOk = sqliteProvider.vecAvailable();
+  const cacheCount = sqliteProvider.embeddingCacheCount();
+  const vecRows = sqliteProvider.vecCount();
+  const itemCount = sqliteProvider.itemCount();
+  const ftsCount = sqliteProvider.ftsCount();
+  console.error(`Cordelia: sqlite-vec available: ${vecOk}`);
+  console.error(`Cordelia: items: ${itemCount}, FTS: ${ftsCount}, vec: ${vecRows}, embedding cache: ${cacheCount}`);
+
+  if (itemCount > 0 && (ftsCount < itemCount || (vecOk && vecRows < itemCount))) {
+    console.error(`Cordelia: index gap detected (items=${itemCount}, fts=${ftsCount}, vec=${vecRows}) — running backfill`);
+    try {
+      const backfillResult = await l2.backfillVec();
+      console.error(`Cordelia: backfill complete — fts_updated=${backfillResult.fts_updated}, vec_generated=${backfillResult.generated}, vec_cached=${backfillResult.cached}, errors=${backfillResult.errors}`);
+    } catch (e) {
+      console.error(`Cordelia: backfill failed: ${(e as Error).message}`);
+    }
+  }
+
+  const embeddingProvider = getDefaultProvider();
+  if (embeddingProvider.dimensions() > 0) {
+    embeddingProvider.isAvailable().then((ok) => {
+      console.error(`Cordelia: embedding provider (${embeddingProvider.name}/${embeddingProvider.modelName()}): ${ok ? 'available' : 'UNAVAILABLE'}`);
+    }).catch(() => {
+      console.error(`Cordelia: embedding provider (${embeddingProvider.name}): UNAVAILABLE`);
+    });
+  } else {
+    console.error('Cordelia: embedding provider: disabled');
+  }
+}
+
 async function main(): Promise<void> {
   // Initialize storage provider
   const storageProvider = await initStorageProvider(MEMORY_ROOT);
@@ -68,36 +99,7 @@ async function main(): Promise<void> {
 
   // Startup health checks + index integrity
   if (storageProvider.name === 'sqlite') {
-    const sqliteProvider = storageProvider as SqliteStorageProvider;
-    const vecOk = sqliteProvider.vecAvailable();
-    const cacheCount = sqliteProvider.embeddingCacheCount();
-    const vecRows = sqliteProvider.vecCount();
-    const itemCount = sqliteProvider.itemCount();
-    const ftsCount = sqliteProvider.ftsCount();
-    console.error(`Cordelia: sqlite-vec available: ${vecOk}`);
-    console.error(`Cordelia: items: ${itemCount}, FTS: ${ftsCount}, vec: ${vecRows}, embedding cache: ${cacheCount}`);
-
-    // Auto-backfill FTS/vec if out of sync with l2_items
-    if (itemCount > 0 && (ftsCount < itemCount || (vecOk && vecRows < itemCount))) {
-      console.error(`Cordelia: index gap detected (items=${itemCount}, fts=${ftsCount}, vec=${vecRows}) — running backfill`);
-      try {
-        const backfillResult = await l2.backfillVec();
-        console.error(`Cordelia: backfill complete — fts_updated=${backfillResult.fts_updated}, vec_generated=${backfillResult.generated}, vec_cached=${backfillResult.cached}, errors=${backfillResult.errors}`);
-      } catch (e) {
-        console.error(`Cordelia: backfill failed: ${(e as Error).message}`);
-      }
-    }
-
-    const embeddingProvider = getDefaultProvider();
-    if (embeddingProvider.dimensions() > 0) {
-      embeddingProvider.isAvailable().then((ok) => {
-        console.error(`Cordelia: embedding provider (${embeddingProvider.name}/${embeddingProvider.modelName()}): ${ok ? 'available' : 'UNAVAILABLE'}`);
-      }).catch(() => {
-        console.error(`Cordelia: embedding provider (${embeddingProvider.name}): UNAVAILABLE`);
-      });
-    } else {
-      console.error('Cordelia: embedding provider: disabled');
-    }
+    await checkAndBackfillSqlite(storageProvider as SqliteStorageProvider);
   }
 
   // Start periodic integrity check (default: 30 min)
