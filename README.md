@@ -2,15 +2,23 @@
 
 [![CI](https://github.com/seed-drill/cordelia-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/seed-drill/cordelia-proxy/actions/workflows/ci.yml)
 
-MCP proxy for Cordelia -- dashboard, session hooks, Claude Code integration.
+TypeScript MCP server, dashboard, and REST API for Cordelia.
 
-## Overview
+> **Looking to install Cordelia?** Go to **[cordelia-agent-sdk](https://github.com/seed-drill/cordelia-agent-sdk)** -- that's the front door.
 
-Cordelia provides Claude with persistent memory that survives session boundaries. This repo contains the TypeScript MCP proxy that agents talk to via stdio/HTTP. Memory is stored in SQLite, encrypted at rest with AES-256-GCM.
+## What This Is
 
-For the Rust P2P node (protocol, replication, crypto), see [cordelia-core](https://github.com/seed-drill/cordelia-core). For architecture, requirements, and threat model, see that repo's documentation.
+This repo contains the MCP proxy server that Claude Code talks to. It handles memory storage (SQLite), encryption (AES-256-GCM), search, groups, and the web dashboard.
+
+## What This Is NOT
+
+This is not where you install Cordelia from. Install, hooks, skills, and setup have moved to **[cordelia-agent-sdk](https://github.com/seed-drill/cordelia-agent-sdk)**.
 
 ## Architecture
+
+```
+Claude Code --> cordelia-agent-sdk (hooks) --> cordelia-proxy (MCP/HTTP) --> cordelia-node (Rust, QUIC)
+```
 
 ```
 Memory Layers:
@@ -28,36 +36,13 @@ L2 items are encrypted at rest using AES-256-GCM with scrypt key derivation. Emb
 
 ## Installation
 
-### One-Command Install (Recommended)
+**For end users:** Use the SDK installer:
 
 ```bash
 curl -fsSL https://seeddrill.ai/install.sh | sh -s -- <your-username>
 ```
 
-Or clone and run locally:
-
-```bash
-git clone https://github.com/seed-drill/cordelia-proxy.git
-cd cordelia-proxy
-./install.sh <your-username>
-```
-
-For Intel Macs (no Ollama/embeddings):
-
-```bash
-./install.sh <your-username> --no-embeddings
-```
-
-The installer:
-1. Detects platform (macOS/Linux, x86_64/aarch64)
-2. Downloads precompiled `cordelia-node` binary
-3. Builds the MCP proxy from source (Node.js required)
-4. Generates encryption key, stores in platform keychain
-5. Creates config, seeds L1 memory context
-6. Configures Claude Code (MCP server, hooks, skills)
-7. Starts `cordelia-node` as a background service (launchd/systemd)
-
-Then open a new terminal and run `claude`.
+See **[cordelia-agent-sdk](https://github.com/seed-drill/cordelia-agent-sdk)** for full instructions.
 
 ## Configuration
 
@@ -134,13 +119,7 @@ The encryption key is **not** stored in MCP config or shell profiles. It is retr
 
 ## Session Hooks
 
-Located in `/hooks/`:
-
-| Hook | Trigger | Actions |
-|------|---------|---------|
-| `session-start.mjs` | Claude Code startup | Decrypt L1, verify integrity chain, update timestamps |
-| `session-end.mjs` | Claude Code exit | Increment session count, extend chain, re-encrypt, auto-commit |
-| `recovery.mjs` | Decryption failure | Shared recovery logic |
+Session hooks have moved to **[cordelia-agent-sdk](https://github.com/seed-drill/cordelia-agent-sdk)**. The SDK hooks resolve this proxy via `getProxyDir()` in `hooks/lib.mjs`.
 
 ## Development
 
@@ -156,7 +135,8 @@ npm run ci       # Full pipeline: lint + typecheck + test + audit + build
 
 ## Related Repos
 
-- [cordelia-core](https://github.com/seed-drill/cordelia-core) -- Protocol core, P2P node, architecture docs (Rust)
+- [cordelia-agent-sdk](https://github.com/seed-drill/cordelia-agent-sdk) -- **Start here.** Install, hooks, skills, agent spec
+- [cordelia-core](https://github.com/seed-drill/cordelia-core) -- Rust P2P node, protocol, replication, governor
 - [cordelia](https://github.com/seed-drill/cordelia) -- Archived monorepo (full git history)
 
 ## License
