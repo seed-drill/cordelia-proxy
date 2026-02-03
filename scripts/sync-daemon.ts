@@ -222,6 +222,51 @@ async function saveRemote(context: L1HotContext): Promise<{ success: boolean; ha
   }
 }
 
+async function pushLocalToRemote(local: L1HotContext): Promise<void> {
+  const updated = updateIntegrity(local);
+  const result = await saveRemote(updated);
+  if (result.success) {
+    await saveLocal(updated);
+    lastSyncedAt = updated.updated_at;
+    log(`Synced: local → remote (${userId}) [${updated.ephemeral?.integrity.chain_hash.substring(0, 8)}...]`, 'success');
+  }
+}
+
+async function pullRemoteToLocal(remote: L1HotContext): Promise<void> {
+  await saveLocal(remote);
+  lastSyncedAt = remote.updated_at;
+  const remoteHash = computeContentHash(remote);
+  log(`Synced: remote → local (${userId}) [${remoteHash.substring(0, 8)}...]`, 'success');
+}
+
+async function reconcileBothExist(local: L1HotContext, remote: L1HotContext): Promise<void> {
+  const localTime = new Date(local.updated_at).getTime();
+  const remoteTime = new Date(remote.updated_at).getTime();
+  const localHash = computeContentHash(local);
+  const remoteHash = computeContentHash(remote);
+
+  if (localTime === remoteTime && localHash === remoteHash) {
+    if (lastSyncedAt !== local.updated_at) {
+      log(`In sync (${userId}) [${localHash.substring(0, 8)}...]`);
+      lastSyncedAt = local.updated_at;
+    }
+    const now = new Date().toISOString();
+    if (local.ephemeral) {
+      local.ephemeral.last_sync_check = now;
+    }
+    await saveLocal(local);
+    return;
+  }
+
+  if (localTime > remoteTime || (localTime === remoteTime && localHash !== remoteHash)) {
+    log(`Local changed (hash: ${localHash.substring(0, 8)}... vs ${remoteHash.substring(0, 8)}...)`);
+    await pushLocalToRemote(local);
+  } else {
+    log(`Remote newer (${remote.updated_at} > ${local.updated_at})`);
+    await pullRemoteToLocal(remote);
+  }
+}
+
 async function sync(): Promise<void> {
   if (syncInProgress) {
     return;
@@ -232,79 +277,24 @@ async function sync(): Promise<void> {
   try {
     const [local, remote] = await Promise.all([loadLocal(), loadRemote()]);
 
-    // No data anywhere
     if (!local && !remote) {
       log('No local or remote data found');
       return;
     }
 
-    // Update last_sync_check timestamp on local file
-    const updateLastSyncCheck = async (context: L1HotContext) => {
-      const now = new Date().toISOString();
-      if (context.ephemeral) {
-        context.ephemeral.last_sync_check = now;
-      }
-      await saveLocal(context);
-    };
-
-    // Only local exists - push to remote
     if (local && !remote) {
       log(`Pushing local to remote (remote empty)`);
-      const updated = updateIntegrity(local);
-      const result = await saveRemote(updated);
-      if (result.success) {
-        await saveLocal(updated); // Save updated integrity locally
-        lastSyncedAt = updated.updated_at;
-        log(`Synced: local → remote (${userId}) [${updated.ephemeral?.integrity.chain_hash.substring(0, 8)}...]`, 'success');
-      }
+      await pushLocalToRemote(local);
       return;
     }
 
-    // Only remote exists - pull to local
     if (!local && remote) {
       log(`Pulling remote to local (local empty)`);
-      await saveLocal(remote);
-      lastSyncedAt = remote.updated_at;
-      log(`Synced: remote → local (${userId})`, 'success');
+      await pullRemoteToLocal(remote);
       return;
     }
 
-    // Both exist - compare timestamps
-    const localTime = new Date(local!.updated_at).getTime();
-    const remoteTime = new Date(remote!.updated_at).getTime();
-
-    // Also compare content hashes to detect changes
-    const localHash = computeContentHash(local!);
-    const remoteHash = computeContentHash(remote!);
-
-    if (localTime === remoteTime && localHash === remoteHash) {
-      // Already in sync - just update last_sync_check
-      if (lastSyncedAt !== local!.updated_at) {
-        log(`In sync (${userId}) [${localHash.substring(0, 8)}...]`);
-        lastSyncedAt = local!.updated_at;
-      }
-      await updateLastSyncCheck(local!);
-      return;
-    }
-
-    // Content differs - determine direction by timestamp
-    if (localTime > remoteTime || (localTime === remoteTime && localHash !== remoteHash)) {
-      // Local is newer or has different content - push
-      log(`Local changed (hash: ${localHash.substring(0, 8)}... vs ${remoteHash.substring(0, 8)}...)`);
-      const updated = updateIntegrity(local!);
-      const result = await saveRemote(updated);
-      if (result.success) {
-        await saveLocal(updated); // Save updated integrity locally
-        lastSyncedAt = updated.updated_at;
-        log(`Synced: local → remote (${userId}) [${updated.ephemeral?.integrity.chain_hash.substring(0, 8)}...]`, 'success');
-      }
-    } else {
-      // Remote is newer - pull
-      log(`Remote newer (${remote!.updated_at} > ${local!.updated_at})`);
-      await saveLocal(remote!);
-      lastSyncedAt = remote!.updated_at;
-      log(`Synced: remote → local (${userId}) [${remoteHash.substring(0, 8)}...]`, 'success');
-    }
+    await reconcileBothExist(local!, remote!);
   } catch (error) {
     log(`Sync error: ${(error as Error).message}`, 'error');
   } finally {

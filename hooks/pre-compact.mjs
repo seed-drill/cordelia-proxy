@@ -77,6 +77,32 @@ async function extractRecentMessages(transcriptPath) {
   return messages.slice(-MAX_MESSAGES);
 }
 
+function isBlockerItem(item) {
+  return item.target === 'active.blockers' || item.signal === 'blocker';
+}
+
+const NOTE_SIGNALS = new Set(['decision', 'insight', 'working_pattern', 'meta_learning']);
+
+function isNoteItem(item) {
+  return item.target?.startsWith('active.notes') || NOTE_SIGNALS.has(item.signal);
+}
+
+function applyBlockerResolution(l1Data, item) {
+  const beforeLen = l1Data.active.blockers.length;
+  l1Data.active.blockers = l1Data.active.blockers.filter(b =>
+    !item.content.toLowerCase().includes(b.toLowerCase().slice(0, 20))
+  );
+  return l1Data.active.blockers.length < beforeLen ? 1 : 0;
+}
+
+function addIfNew(list, existingSet, content) {
+  const lower = content.toLowerCase();
+  if (existingSet.has(lower)) return 0;
+  list.push(content);
+  existingSet.add(lower);
+  return 1;
+}
+
 /**
  * Apply novelty suggestions to L1 data. Returns count of items persisted.
  */
@@ -91,31 +117,14 @@ function applyToL1(l1Data, suggestions) {
   let persisted = 0;
 
   for (const item of suggestions) {
-    const contentLower = item.content.toLowerCase();
-
-    if (item.target === 'active.blockers' || item.signal === 'blocker') {
+    if (isBlockerItem(item)) {
       if (/unblocked|resolved/i.test(item.content)) {
-        const beforeLen = l1Data.active.blockers.length;
-        l1Data.active.blockers = l1Data.active.blockers.filter(b =>
-          !item.content.toLowerCase().includes(b.toLowerCase().slice(0, 20))
-        );
-        if (l1Data.active.blockers.length < beforeLen) persisted++;
+        persisted += applyBlockerResolution(l1Data, item);
         continue;
       }
-
-      if (!existingBlockers.has(contentLower)) {
-        l1Data.active.blockers.push(item.content);
-        existingBlockers.add(contentLower);
-        persisted++;
-      }
-    } else if (item.target?.startsWith('active.notes') || item.signal === 'decision' ||
-               item.signal === 'insight' || item.signal === 'working_pattern' ||
-               item.signal === 'meta_learning') {
-      if (!existingNotes.has(contentLower)) {
-        l1Data.active.notes.push(item.content);
-        existingNotes.add(contentLower);
-        persisted++;
-      }
+      persisted += addIfNew(l1Data.active.blockers, existingBlockers, item.content);
+    } else if (isNoteItem(item)) {
+      persisted += addIfNew(l1Data.active.notes, existingNotes, item.content);
     }
   }
 

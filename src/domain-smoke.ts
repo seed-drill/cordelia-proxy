@@ -28,11 +28,7 @@ function assert(condition: boolean, label: string, detail?: string): void {
   }
 }
 
-async function main(): Promise<void> {
-  console.log('Cordelia: Domain Smoke Test');
-  console.log('='.repeat(50));
-
-  // Init crypto
+async function initCryptoIfEnabled(): Promise<void> {
   const passphrase = process.env.CORDELIA_ENCRYPTION_KEY;
   const config = getCryptoConfig(MEMORY_ROOT);
   if (config.enabled && passphrase) {
@@ -42,6 +38,60 @@ async function main(): Promise<void> {
   } else {
     console.log('WARNING: no encryption key');
   }
+}
+
+function assertAllDomain(
+  results: Array<{ domain?: string }>,
+  domain: string,
+  label: string,
+): void {
+  const all = results.every(r => r.domain === domain);
+  assert(all, label,
+    all ? '' : `got domains: ${[...new Set(results.map(r => r.domain))].join(',')}`);
+}
+
+function verifyDomainBoost(
+  boostResults: { results: Array<{ domain?: string; name: string; score: number }> },
+): void {
+  if (boostResults.results.length > 0) {
+    const valueBoosted = boostResults.results.filter(r => r.domain === 'value');
+    const procUnboosted = boostResults.results.filter(r => r.domain === 'procedural');
+    console.log(`  Value results: ${valueBoosted.length}, Procedural results: ${procUnboosted.length}`);
+
+    if (valueBoosted.length > 0 && procUnboosted.length > 0) {
+      console.log(`  Top value: ${valueBoosted[0].name.slice(0,30)} score=${valueBoosted[0].score.toFixed(3)}`);
+      console.log(`  Top proc:  ${procUnboosted[0].name.slice(0,30)} score=${procUnboosted[0].score.toFixed(3)}`);
+    }
+    assert(boostResults.results.length > 0, 'boost query returns results');
+  } else {
+    console.log('  SKIP: no results for boost query');
+  }
+}
+
+function verifyPrefetchOrder(domainOrder: Array<string | undefined>): void {
+  const firstNonValue = domainOrder.findIndex(d => d !== 'value');
+  const lastValue = domainOrder.lastIndexOf('value');
+
+  if (lastValue >= 0 && firstNonValue >= 0) {
+    assert(lastValue < firstNonValue || firstNonValue === -1,
+      'value items come before non-value in prefetch',
+      `first non-value at ${firstNonValue}, last value at ${lastValue}`);
+  }
+
+  const firstInterrupt = domainOrder.findIndex(d => d === 'interrupt');
+  const lastProcedural = domainOrder.lastIndexOf('procedural');
+  if (firstInterrupt >= 0 && lastProcedural >= 0) {
+    assert(lastProcedural <= firstInterrupt,
+      'procedural items come before interrupt in prefetch',
+      `last proc at ${lastProcedural}, first interrupt at ${firstInterrupt}`);
+  }
+}
+
+async function main(): Promise<void> {
+  console.log('Cordelia: Domain Smoke Test');
+  console.log('='.repeat(50));
+
+  await initCryptoIfEnabled();
 
   const provider = await initStorageProvider(MEMORY_ROOT);
   console.log(`Storage: ${provider.name}`);
@@ -99,9 +149,7 @@ async function main(): Promise<void> {
 
   const valueResults = await search({ domain: 'value', limit: 20 });
   assert(valueResults.length > 0, 'value domain search returns results', `got ${valueResults.length}`);
-  const allValue = valueResults.every(r => r.domain === 'value');
-  assert(allValue, 'all results are value domain',
-    allValue ? '' : `got domains: ${[...new Set(valueResults.map(r => r.domain))].join(',')}`);
+  assertAllDomain(valueResults, 'value', 'all results are value domain');
   console.log(`  Value items: ${valueResults.length}`);
   for (const r of valueResults.slice(0, 5)) {
     console.log(`    ${r.name.slice(0,50)} (${r.type}/${r.domain})`);
@@ -115,8 +163,7 @@ async function main(): Promise<void> {
 
   const interruptResults = await search({ domain: 'interrupt', limit: 20 });
   assert(interruptResults.length > 0, 'interrupt domain search returns results', `got ${interruptResults.length}`);
-  const allInterrupt = interruptResults.every(r => r.domain === 'interrupt');
-  assert(allInterrupt, 'all results are interrupt domain');
+  assertAllDomain(interruptResults, 'interrupt', 'all results are interrupt domain');
   console.log(`  Interrupt items: ${interruptResults.length}`);
   console.log();
 
@@ -127,8 +174,7 @@ async function main(): Promise<void> {
 
   const procResults = await search({ domain: 'procedural', limit: 5 });
   assert(procResults.length > 0, 'procedural domain search returns results');
-  const allProc = procResults.every(r => r.domain === 'procedural');
-  assert(allProc, 'all results are procedural domain');
+  assertAllDomain(procResults, 'procedural', 'all results are procedural domain');
   console.log();
 
   // =========================================================================
@@ -149,22 +195,8 @@ async function main(): Promise<void> {
   // =========================================================================
   console.log('7. Domain boost check');
 
-  // Search without filter but check that value items get the +0.05 boost
   const boostResults = await search({ query: 'sovereignty', limit: 10, debug: true as const });
-  if (boostResults.results.length > 0) {
-    const valueBoosted = boostResults.results.filter(r => r.domain === 'value');
-    const procUnboosted = boostResults.results.filter(r => r.domain === 'procedural');
-    console.log(`  Value results: ${valueBoosted.length}, Procedural results: ${procUnboosted.length}`);
-    
-    if (valueBoosted.length > 0 && procUnboosted.length > 0) {
-      // A value item with similar FTS score should rank higher than procedural
-      console.log(`  Top value: ${valueBoosted[0].name.slice(0,30)} score=${valueBoosted[0].score.toFixed(3)}`);
-      console.log(`  Top proc:  ${procUnboosted[0].name.slice(0,30)} score=${procUnboosted[0].score.toFixed(3)}`);
-    }
-    assert(boostResults.results.length > 0, 'boost query returns results');
-  } else {
-    console.log('  SKIP: no results for boost query');
-  }
+  verifyDomainBoost(boostResults);
   console.log();
 
   // =========================================================================
@@ -175,25 +207,8 @@ async function main(): Promise<void> {
   const prefetched = await prefetchItems('russell', { limit: 20 });
   assert(prefetched.length > 0, 'prefetch returns items', `got ${prefetched.length}`);
   
-  // Check domain ordering: values should come first
   const domainOrder = prefetched.map(p => p.domain);
-  const firstNonValue = domainOrder.findIndex(d => d !== 'value');
-  const lastValue = domainOrder.lastIndexOf('value');
-  
-  if (lastValue >= 0 && firstNonValue >= 0) {
-    assert(lastValue < firstNonValue || firstNonValue === -1,
-      'value items come before non-value in prefetch',
-      `first non-value at ${firstNonValue}, last value at ${lastValue}`);
-  }
-  
-  // Check no interrupt appears before procedural
-  const firstInterrupt = domainOrder.findIndex(d => d === 'interrupt');
-  const lastProcedural = domainOrder.lastIndexOf('procedural');
-  if (firstInterrupt >= 0 && lastProcedural >= 0) {
-    assert(lastProcedural <= firstInterrupt,
-      'procedural items come before interrupt in prefetch',
-      `last proc at ${lastProcedural}, first interrupt at ${firstInterrupt}`);
-  }
+  verifyPrefetchOrder(domainOrder);
 
   console.log(`  Order: ${domainOrder.join(', ')}`);
   console.log();

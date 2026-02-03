@@ -90,6 +90,51 @@ check('SQLite PRAGMA integrity_check', () => {
 
 // --- 3. L1 chain hash verification ---
 
+type ParseResult =
+  | { status: 'skip'; reason: string }
+  | { status: 'ok'; l1Data: Record<string, unknown> };
+
+function tryParseL1(raw: string, label: string): ParseResult {
+  let l1Data: Record<string, unknown>;
+  try {
+    l1Data = JSON.parse(raw);
+  } catch {
+    return { status: 'skip', reason: `${label} (parse failed)` };
+  }
+  if ((l1Data as Record<string, unknown>)._encrypted) {
+    return { status: 'skip', reason: `${label} (encrypted payload)` };
+  }
+  return { status: 'ok', l1Data };
+}
+
+function stripIntegrity(l1Data: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...l1Data };
+  if (copy.ephemeral && typeof copy.ephemeral === 'object') {
+    copy.ephemeral = { ...(copy.ephemeral as Record<string, unknown>) };
+    delete (copy.ephemeral as Record<string, unknown>).integrity;
+  }
+  return copy;
+}
+
+function verifyChainHash(l1Data: Record<string, unknown>, label: string): string | null {
+  const ephemeral = l1Data.ephemeral as Record<string, unknown> | undefined;
+  if (!ephemeral?.integrity) {
+    return null;
+  }
+
+  const integrity = ephemeral.integrity as { chain_hash: string; previous_hash: string };
+  const dataWithoutIntegrity = stripIntegrity(l1Data);
+  const contentHash = crypto.createHash('sha256').update(JSON.stringify(dataWithoutIntegrity)).digest('hex');
+  const expectedHash = crypto.createHash('sha256')
+    .update(`${integrity.previous_hash}${ephemeral.session_count}${contentHash}`)
+    .digest('hex');
+
+  if (expectedHash !== integrity.chain_hash) {
+    throw new Error(`${label}: chain hash mismatch (expected ${expectedHash.slice(0, 16)}..., got ${integrity.chain_hash.slice(0, 16)}...)`);
+  }
+  return label;
+}
+
 check('L1 chain hash (all users)', () => {
   const users = db.prepare('SELECT user_id, data FROM l1_hot').all() as Array<{ user_id: string; data: Buffer }>;
   if (users.length === 0) throw new Error('No L1 users in SQLite');
@@ -98,44 +143,20 @@ check('L1 chain hash (all users)', () => {
   const skipped: string[] = [];
 
   for (const user of users) {
-    let l1Data: Record<string, unknown>;
-    try {
-      l1Data = JSON.parse(user.data.toString('utf-8'));
-    } catch {
-      // Encrypted - check JSON files instead
-      skipped.push(`${user.user_id} (encrypted in db)`);
+    const parsed = tryParseL1(user.data.toString('utf-8'), `${user.user_id} (encrypted in db)`);
+    if (parsed.status === 'skip') {
+      skipped.push(parsed.reason);
       continue;
     }
 
-    if ((l1Data as Record<string, unknown>)._encrypted) {
-      skipped.push(`${user.user_id} (encrypted payload)`);
-      continue;
-    }
-
-    const ephemeral = l1Data.ephemeral as Record<string, unknown> | undefined;
-    if (!ephemeral?.integrity) {
+    const result = verifyChainHash(parsed.l1Data, user.user_id);
+    if (result === null) {
       skipped.push(`${user.user_id} (no integrity block)`);
-      continue;
+    } else {
+      verified.push(result);
     }
-
-    const integrity = ephemeral.integrity as { chain_hash: string; previous_hash: string };
-    const dataWithoutIntegrity = { ...l1Data };
-    if (dataWithoutIntegrity.ephemeral && typeof dataWithoutIntegrity.ephemeral === 'object') {
-      dataWithoutIntegrity.ephemeral = { ...(dataWithoutIntegrity.ephemeral as Record<string, unknown>) };
-      delete (dataWithoutIntegrity.ephemeral as Record<string, unknown>).integrity;
-    }
-    const contentHash = crypto.createHash('sha256').update(JSON.stringify(dataWithoutIntegrity)).digest('hex');
-    const expectedHash = crypto.createHash('sha256')
-      .update(`${integrity.previous_hash}${ephemeral.session_count}${contentHash}`)
-      .digest('hex');
-
-    if (expectedHash !== integrity.chain_hash) {
-      throw new Error(`${user.user_id}: chain hash mismatch (expected ${expectedHash.slice(0, 16)}..., got ${integrity.chain_hash.slice(0, 16)}...)`);
-    }
-    verified.push(user.user_id);
   }
 
-  // Also check JSON L1 files
   if (fs.existsSync(L1_DIR)) {
     const jsonFiles = fs.readdirSync(L1_DIR).filter(f => f.endsWith('.json'));
     for (const file of jsonFiles) {
@@ -143,35 +164,18 @@ check('L1 chain hash (all users)', () => {
       if (verified.includes(userId) || skipped.some(s => s.startsWith(userId))) continue;
 
       const raw = fs.readFileSync(path.join(L1_DIR, file), 'utf-8');
-      let l1Data: Record<string, unknown>;
-      try {
-        l1Data = JSON.parse(raw);
-      } catch {
-        skipped.push(`${userId} (JSON parse failed)`);
+      const parsed = tryParseL1(raw, `${userId} (JSON parse failed)`);
+      if (parsed.status === 'skip') {
+        skipped.push(parsed.reason);
         continue;
       }
 
-      const ephemeral = l1Data.ephemeral as Record<string, unknown> | undefined;
-      if (!ephemeral?.integrity) {
+      const result = verifyChainHash(parsed.l1Data, `${userId} (json)`);
+      if (result === null) {
         skipped.push(`${userId} (json, no integrity)`);
-        continue;
+      } else {
+        verified.push(result);
       }
-
-      const integrity = ephemeral.integrity as { chain_hash: string; previous_hash: string };
-      const dataWithoutIntegrity = { ...l1Data };
-      if (dataWithoutIntegrity.ephemeral && typeof dataWithoutIntegrity.ephemeral === 'object') {
-        dataWithoutIntegrity.ephemeral = { ...(dataWithoutIntegrity.ephemeral as Record<string, unknown>) };
-        delete (dataWithoutIntegrity.ephemeral as Record<string, unknown>).integrity;
-      }
-      const contentHash = crypto.createHash('sha256').update(JSON.stringify(dataWithoutIntegrity)).digest('hex');
-      const expectedHash = crypto.createHash('sha256')
-        .update(`${integrity.previous_hash}${ephemeral.session_count}${contentHash}`)
-        .digest('hex');
-
-      if (expectedHash !== integrity.chain_hash) {
-        throw new Error(`${userId} (json): chain hash mismatch`);
-      }
-      verified.push(`${userId} (json)`);
     }
   }
 

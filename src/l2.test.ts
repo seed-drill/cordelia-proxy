@@ -29,6 +29,15 @@ function assert(condition: boolean, message: string): void {
   }
 }
 
+async function runCase(
+  tally: { passed: number; failed: number },
+  name: string,
+  fn: () => Promise<void>,
+): Promise<void> {
+  if (await test(name, fn)) tally.passed++;
+  else tally.failed++;
+}
+
 async function runTests(): Promise<void> {
   // Use temp SQLite database for isolation — keyword search requires FTS5
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cordelia-l2-test-'));
@@ -38,18 +47,15 @@ async function runTests(): Promise<void> {
 
   console.log('\nL2 Warm Index Tests\n' + '='.repeat(40));
 
-  let passed = 0;
-  let failed = 0;
+  const tally = { passed: 0, failed: 0 };
 
-  // Test: Load empty index
-  if (await test('loadIndex returns valid index', async () => {
+  await runCase(tally, 'loadIndex returns valid index', async () => {
     const index = await l2.loadIndex();
     assert(index.version === 1, 'version should be 1');
     assert(Array.isArray(index.entries), 'entries should be array');
-  })) passed++; else failed++;
+  });
 
-  // Test: Write entity
-  if (await test('writeItem creates entity', async () => {
+  await runCase(tally, 'writeItem creates entity', async () => {
     const result = await l2.writeItem('entity', {
       type: 'person',
       name: 'Test Person',
@@ -58,10 +64,9 @@ async function runTests(): Promise<void> {
     });
     assert('success' in result && result.success === true, 'should succeed');
     assert('id' in result && typeof result.id === 'string', 'should return id');
-  })) passed++; else failed++;
+  });
 
-  // Test: Write learning
-  if (await test('writeItem creates learning', async () => {
+  await runCase(tally, 'writeItem creates learning', async () => {
     const result = await l2.writeItem('learning', {
       type: 'insight',
       content: 'Testing is important for reliability',
@@ -69,62 +74,53 @@ async function runTests(): Promise<void> {
       confidence: 0.9,
     });
     assert('success' in result && result.success === true, 'should succeed');
-  })) passed++; else failed++;
+  });
 
-  // Test: Search by query
-  if (await test('search finds by keyword', async () => {
+  await runCase(tally, 'search finds by keyword', async () => {
     const results = await l2.search({ query: 'test' });
     assert(results.length > 0, 'should find results');
     assert(results[0].score > 0, 'should have positive score');
-  })) passed++; else failed++;
+  });
 
-  // Test: Search by type
-  if (await test('search filters by type', async () => {
+  await runCase(tally, 'search filters by type', async () => {
     const entities = await l2.search({ type: 'entity' });
     const learnings = await l2.search({ type: 'learning' });
     assert(entities.every((e) => e.type === 'entity'), 'all should be entities');
     assert(learnings.every((e) => e.type === 'learning'), 'all should be learnings');
-  })) passed++; else failed++;
+  });
 
-  // Test: Search by tags
-  if (await test('search filters by tags', async () => {
+  await runCase(tally, 'search filters by tags', async () => {
     const results = await l2.search({ tags: ['testing'] });
     assert(results.length > 0, 'should find tagged items');
-  })) passed++; else failed++;
+  });
 
-  // Test: Read item
-  if (await test('readItem retrieves written item', async () => {
+  await runCase(tally, 'readItem retrieves written item', async () => {
     const searchResults = await l2.search({ query: 'Test Person' });
     assert(searchResults.length > 0, 'should find test person');
 
     const item = await l2.readItem(searchResults[0].id);
     assert(item !== null, 'should return item');
     assert((item as { name: string }).name === 'Test Person', 'should have correct name');
-  })) passed++; else failed++;
+  });
 
-  // Test: Encrypted index round-trip
-  if (await test('index encrypts and decrypts correctly', async () => {
-    // Save the index (will encrypt if crypto is enabled)
+  await runCase(tally, 'index encrypts and decrypts correctly', async () => {
     const indexBefore = await l2.loadIndex();
     const entryCount = indexBefore.entries.length;
     await l2.saveIndex(indexBefore);
 
-    // Load back and verify data survives the round-trip
     const indexAfter = await l2.loadIndex();
     assert(indexAfter.version === 1, 'version should survive round-trip');
     assert(indexAfter.entries.length === entryCount, `entry count should survive round-trip (expected ${entryCount}, got ${indexAfter.entries.length})`);
 
-    // Verify entries have correct structure
     for (const entry of indexAfter.entries) {
       assert(typeof entry.id === 'string' && entry.id.length > 0, 'entry should have id');
       assert(typeof entry.name === 'string', 'entry should have name');
       assert(Array.isArray(entry.tags), 'entry should have tags array');
       assert(Array.isArray(entry.keywords), 'entry should have keywords array');
     }
-  })) passed++; else failed++;
+  });
 
-  // Test: Details field is written to entity
-  if (await test('writeItem preserves details field', async () => {
+  await runCase(tally, 'writeItem preserves details field', async () => {
     const result = await l2.writeItem('entity', {
       type: 'concept',
       name: 'Connectionist Test',
@@ -146,23 +142,22 @@ async function runTests(): Promise<void> {
     assert(details !== undefined, 'should have details');
     assert(details!.hardware === 'Trained ANNs on 386DX33', 'should preserve hardware detail');
     assert(details!.location === 'Manchester 1993', 'should preserve location detail');
-  })) passed++; else failed++;
+  });
 
-  // Test: Rebuild index
-  if (await test('rebuildIndex scans files', async () => {
+  await runCase(tally, 'rebuildIndex scans files', async () => {
     const result = await l2.rebuildIndex();
     assert('success' in result && result.success === true, 'should succeed');
     assert('count' in result && result.count >= 0, 'should return count');
-  })) passed++; else failed++;
+  });
 
   // Cleanup
   await getStorageProvider().close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
   console.log('\n' + '='.repeat(40));
-  console.log(`Results: ${passed} passed, ${failed} failed\n`);
+  console.log(`Results: ${tally.passed} passed, ${tally.failed} failed\n`);
 
-  if (failed > 0) {
+  if (tally.failed > 0) {
     process.exit(1);
   }
 }

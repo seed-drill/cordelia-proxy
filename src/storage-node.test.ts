@@ -24,6 +24,144 @@ interface MockStore {
   groups: Map<string, { group: Record<string, unknown>; members: Array<Record<string, unknown>> }>;
 }
 
+interface RouteResult { status: number; response: unknown }
+
+function handleL1Route(
+  store: MockStore, path: string, body: Record<string, unknown>,
+): RouteResult | null {
+  switch (path) {
+    case '/api/v1/l1/read': {
+      const data = store.l1.get(body.user_id as string);
+      return data === undefined
+        ? { status: 404, response: 'not found' }
+        : { status: 200, response: data };
+    }
+    case '/api/v1/l1/write':
+      store.l1.set(body.user_id as string, body.data);
+      return { status: 200, response: { ok: true } };
+    default:
+      return null;
+  }
+}
+
+function handleL2Route(
+  store: MockStore, path: string, body: Record<string, unknown>,
+): RouteResult | null {
+  switch (path) {
+    case '/api/v1/l2/read': {
+      const item = store.l2.get(body.item_id as string);
+      return !item
+        ? { status: 404, response: 'not found' }
+        : { status: 200, response: { data: item.data, type: item.type, meta: item.meta } };
+    }
+    case '/api/v1/l2/write':
+      store.l2.set(body.item_id as string, {
+        data: body.data as unknown,
+        type: body.type as string,
+        meta: (body.meta ?? {}) as Record<string, unknown>,
+      });
+      return { status: 200, response: { ok: true } };
+    case '/api/v1/l2/delete':
+      return store.l2.has(body.item_id as string)
+        ? (store.l2.delete(body.item_id as string), { status: 200, response: { ok: true } })
+        : { status: 404, response: 'not found' };
+    case '/api/v1/l2/search':
+      return { status: 200, response: { results: ['item-1', 'item-2'] } };
+    default:
+      return null;
+  }
+}
+
+function handleGroupRoute(
+  store: MockStore, path: string, body: Record<string, unknown>,
+): RouteResult | null {
+  switch (path) {
+    case '/api/v1/groups/create':
+      store.groups.set(body.group_id as string, {
+        group: {
+          id: body.group_id, name: body.name, culture: body.culture,
+          security_policy: body.security_policy,
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        },
+        members: [],
+      });
+      return { status: 200, response: { ok: true } };
+    case '/api/v1/groups/read': {
+      const grp = store.groups.get(body.group_id as string);
+      return !grp
+        ? { status: 404, response: 'group not found' }
+        : { status: 200, response: grp };
+    }
+    case '/api/v1/groups/list':
+      return {
+        status: 200,
+        response: { groups: Array.from(store.groups.values()).map((g) => g.group) },
+      };
+    case '/api/v1/groups/delete':
+      return store.groups.has(body.group_id as string)
+        ? (store.groups.delete(body.group_id as string), { status: 200, response: { ok: true } })
+        : { status: 404, response: 'group not found' };
+    case '/api/v1/groups/items':
+      return { status: 200, response: { items: [] } };
+    default:
+      return null;
+  }
+}
+
+function handleMemberRoute(
+  store: MockStore, path: string, body: Record<string, unknown>,
+): RouteResult | null {
+  switch (path) {
+    case '/api/v1/groups/add_member': {
+      const g = store.groups.get(body.group_id as string);
+      if (g) {
+        g.members.push({
+          group_id: body.group_id, entity_id: body.entity_id,
+          role: body.role, posture: 'active', joined_at: new Date().toISOString(),
+        });
+      }
+      return { status: 200, response: { ok: true } };
+    }
+    case '/api/v1/groups/remove_member': {
+      const gr = store.groups.get(body.group_id as string);
+      if (!gr) return { status: 404, response: 'member not found' };
+      const idx = gr.members.findIndex((m) => m.entity_id === body.entity_id);
+      if (idx < 0) return { status: 404, response: 'member not found' };
+      gr.members.splice(idx, 1);
+      return { status: 200, response: { ok: true } };
+    }
+    case '/api/v1/groups/update_posture': {
+      const gp = store.groups.get(body.group_id as string);
+      if (!gp) return { status: 404, response: 'member not found' };
+      const member = gp.members.find((m) => m.entity_id === body.entity_id);
+      if (!member) return { status: 404, response: 'member not found' };
+      member.posture = body.posture;
+      return { status: 200, response: { ok: true } };
+    }
+    default:
+      return null;
+  }
+}
+
+function routeRequest(
+  store: MockStore, path: string, body: Record<string, unknown>,
+): RouteResult {
+  if (path === '/api/v1/status') {
+    return {
+      status: 200,
+      response: {
+        node_id: 'test-node', entity_id: 'test-entity', uptime_secs: 42,
+        peers_warm: 1, peers_hot: 2, groups: ['seed-drill'],
+      },
+    };
+  }
+  return handleL1Route(store, path, body)
+    ?? handleL2Route(store, path, body)
+    ?? handleGroupRoute(store, path, body)
+    ?? handleMemberRoute(store, path, body)
+    ?? { status: 404, response: 'not found' };
+}
+
 function createMockServer(): { server: http.Server; store: MockStore } {
   const store: MockStore = {
     l1: new Map(),
@@ -32,7 +170,6 @@ function createMockServer(): { server: http.Server; store: MockStore } {
   };
 
   const server = http.createServer((req, res) => {
-    // Auth check
     const auth = req.headers['authorization'];
     if (auth !== `Bearer ${TEST_TOKEN}`) {
       res.writeHead(401);
@@ -44,173 +181,7 @@ function createMockServer(): { server: http.Server; store: MockStore } {
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
-      const path = req.url;
-
-      let status = 200;
-      let response: unknown = { ok: true };
-
-      switch (path) {
-        case '/api/v1/status':
-          response = {
-            node_id: 'test-node',
-            entity_id: 'test-entity',
-            uptime_secs: 42,
-            peers_warm: 1,
-            peers_hot: 2,
-            groups: ['seed-drill'],
-          };
-          break;
-
-        case '/api/v1/l1/read': {
-          const data = store.l1.get(body.user_id);
-          if (data === undefined) {
-            status = 404;
-            response = 'not found';
-          } else {
-            response = data;
-          }
-          break;
-        }
-
-        case '/api/v1/l1/write':
-          store.l1.set(body.user_id, body.data);
-          break;
-
-        case '/api/v1/l2/read': {
-          const item = store.l2.get(body.item_id);
-          if (!item) {
-            status = 404;
-            response = 'not found';
-          } else {
-            response = {
-              data: item.data,
-              type: item.type,
-              meta: item.meta,
-            };
-          }
-          break;
-        }
-
-        case '/api/v1/l2/write':
-          store.l2.set(body.item_id, {
-            data: body.data,
-            type: body.type,
-            meta: body.meta ?? {},
-          });
-          break;
-
-        case '/api/v1/l2/delete': {
-          if (store.l2.has(body.item_id)) {
-            store.l2.delete(body.item_id);
-          } else {
-            status = 404;
-            response = 'not found';
-          }
-          break;
-        }
-
-        case '/api/v1/l2/search':
-          response = { results: ['item-1', 'item-2'] };
-          break;
-
-        case '/api/v1/groups/create':
-          store.groups.set(body.group_id, {
-            group: {
-              id: body.group_id,
-              name: body.name,
-              culture: body.culture,
-              security_policy: body.security_policy,
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            },
-            members: [],
-          });
-          break;
-
-        case '/api/v1/groups/read': {
-          const grp = store.groups.get(body.group_id);
-          if (!grp) {
-            status = 404;
-            response = 'group not found';
-          } else {
-            response = grp;
-          }
-          break;
-        }
-
-        case '/api/v1/groups/list':
-          response = {
-            groups: Array.from(store.groups.values()).map((g) => g.group),
-          };
-          break;
-
-        case '/api/v1/groups/delete': {
-          if (store.groups.has(body.group_id)) {
-            store.groups.delete(body.group_id);
-          } else {
-            status = 404;
-            response = 'group not found';
-          }
-          break;
-        }
-
-        case '/api/v1/groups/items':
-          response = { items: [] };
-          break;
-
-        case '/api/v1/groups/add_member': {
-          const g = store.groups.get(body.group_id);
-          if (g) {
-            g.members.push({
-              group_id: body.group_id,
-              entity_id: body.entity_id,
-              role: body.role,
-              posture: 'active',
-              joined_at: new Date().toISOString(),
-            });
-          }
-          break;
-        }
-
-        case '/api/v1/groups/remove_member': {
-          const gr = store.groups.get(body.group_id);
-          if (gr) {
-            const idx = gr.members.findIndex((m) => m.entity_id === body.entity_id);
-            if (idx >= 0) {
-              gr.members.splice(idx, 1);
-            } else {
-              status = 404;
-              response = 'member not found';
-            }
-          } else {
-            status = 404;
-            response = 'member not found';
-          }
-          break;
-        }
-
-        case '/api/v1/groups/update_posture': {
-          const gp = store.groups.get(body.group_id);
-          if (gp) {
-            const member = gp.members.find((m) => m.entity_id === body.entity_id);
-            if (member) {
-              member.posture = body.posture;
-            } else {
-              status = 404;
-              response = 'member not found';
-            }
-          } else {
-            status = 404;
-            response = 'member not found';
-          }
-          break;
-        }
-
-        default:
-          status = 404;
-          response = 'not found';
-      }
-
+      const { status, response } = routeRequest(store, req.url ?? '', body);
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(typeof response === 'string' ? response : JSON.stringify(response));
     });

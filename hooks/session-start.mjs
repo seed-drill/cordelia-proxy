@@ -108,6 +108,93 @@ function verifyIntegrity(l1Data) {
   };
 }
 
+function outputContextBlock(json) {
+  console.log('=== CORDELIA L1 HOT CONTEXT ===');
+  console.log(json);
+  console.log('=== END CORDELIA CONTEXT ===');
+}
+
+async function updateSessionStart(client, userId, l1Data) {
+  const now = new Date().toISOString();
+  l1Data.ephemeral.current_session_start = now;
+
+  const contentHash = computeContentHash(l1Data);
+  l1Data.ephemeral.integrity.chain_hash = computeChainHash(
+    l1Data.ephemeral.integrity.previous_hash,
+    l1Data.ephemeral.session_count,
+    contentHash
+  );
+
+  const writeResult = await writeL1(client, userId, 'replace', l1Data, l1Data.updated_at);
+  if (writeResult?.error) {
+    console.error(`[Cordelia] Write error: ${writeResult.error}`);
+  }
+}
+
+function buildBannerVars(l1Data) {
+  const genesisDate = l1Data.ephemeral?.integrity?.genesis
+    ? new Date(l1Data.ephemeral.integrity.genesis)
+    : null;
+  const daysSinceGenesis = genesisDate
+    ? Math.floor((new Date() - genesisDate) / (1000 * 60 * 60 * 24))
+    : '?';
+  const sessionNum = l1Data.ephemeral?.session_count || '?';
+  const lastEnd = l1Data.ephemeral?.last_session_end
+    ? new Date(l1Data.ephemeral.last_session_end).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+    : null;
+  const focus = l1Data.active?.focus || 'No active focus';
+  return { daysSinceGenesis, sessionNum, lastEnd, focus };
+}
+
+function logStatusBanner(integrity, syncStatus, bannerVars, l1Data, userId) {
+  const { daysSinceGenesis, sessionNum, lastEnd, focus } = bannerVars;
+
+  console.log('');
+  console.log('================================================');
+  if (integrity.valid) {
+    console.log(`[CORDELIA] Session ${sessionNum} | Genesis +${daysSinceGenesis}d | Chain: VERIFIED`);
+  } else {
+    console.log(`[CORDELIA] Session ${sessionNum} | Genesis +${daysSinceGenesis}d | Chain: FAILED`);
+    console.log(`[WARNING] ${integrity.reason}`);
+  }
+
+  logSyncLine(syncStatus, userId);
+
+  if (lastEnd) {
+    console.log(`[LAST] ${lastEnd}`);
+  }
+  console.log(`[FOCUS] ${focus}`);
+  if (l1Data.ephemeral?.last_summary) {
+    console.log(`[PREV] ${l1Data.ephemeral.last_summary}`);
+  }
+  if (l1Data.ephemeral?.open_threads?.length > 0) {
+    console.log(`[THREADS] ${l1Data.ephemeral.open_threads.join(', ')}`);
+  }
+  console.log('================================================');
+  console.log('');
+}
+
+function logSyncLine(syncStatus, userId) {
+  if (!syncStatus.synced) {
+    console.log(`[SYNC] ${syncStatus.message}`);
+    if (syncStatus.direction === 'pull') {
+      console.log(`[SYNC] To pull: curl ${REMOTE_URL}/api/hot/${userId} > memory/L1-hot/${userId}.json`);
+    }
+  } else if (syncStatus.reason) {
+    console.log(`[SYNC] ${syncStatus.reason}`);
+  } else {
+    console.log(`[SYNC] Local and remote in sync`);
+  }
+}
+
+function sendNotification(integrity, sessionNum) {
+  if (integrity.valid) {
+    notify('Cordelia Active', `Session ${sessionNum} | Chain verified`);
+  } else {
+    notify('Cordelia: INTEGRITY FAILED', integrity.reason);
+  }
+}
+
 async function main() {
   let userId;
   try {
@@ -126,131 +213,45 @@ async function main() {
 
   let client;
   try {
-    // Ensure HTTP server sidecar is running
     const memoryRoot = await getMemoryRoot();
     const { baseUrl, cold } = await ensureServer(passphrase, memoryRoot);
     if (cold) {
       console.error('[Cordelia] Started HTTP server sidecar');
     }
 
-    // Connect MCP client
     client = await createMcpClient(baseUrl);
-
-    // Read L1 via MCP
     const l1Data = await readL1(client, userId);
 
     if (!l1Data) {
       console.error(`[Cordelia] No L1 context found for user: ${userId}`);
-      console.log('=== CORDELIA L1 HOT CONTEXT ===');
-      console.log(`{"error": "no L1 context for ${userId}"}`);
-      console.log('=== END CORDELIA CONTEXT ===');
+      outputContextBlock(`{"error": "no L1 context for ${userId}"}`);
       process.exit(0);
     }
 
-    // Verify integrity BEFORE any modifications
     const integrity = verifyIntegrity(l1Data);
 
-    // Only update session start time if integrity verified
     if (integrity.valid && l1Data.ephemeral) {
-      const now = new Date().toISOString();
-      l1Data.ephemeral.current_session_start = now;
-
-      // Recompute chain hash after updating session start
-      const contentHash = computeContentHash(l1Data);
-      l1Data.ephemeral.integrity.chain_hash = computeChainHash(
-        l1Data.ephemeral.integrity.previous_hash,
-        l1Data.ephemeral.session_count,
-        contentHash
-      );
-
-      // Write back via MCP
-      const writeResult = await writeL1(client, userId, 'replace', l1Data, l1Data.updated_at);
-      if (writeResult?.error) {
-        console.error(`[Cordelia] Write error: ${writeResult.error}`);
-      }
+      await updateSessionStart(client, userId, l1Data);
     }
 
-    // Check sync status with remote
     const syncStatus = await checkSyncStatus(userId, l1Data);
+    const bannerVars = buildBannerVars(l1Data);
 
-    // Output status banner
-    const genesisDate = l1Data.ephemeral?.integrity?.genesis
-      ? new Date(l1Data.ephemeral.integrity.genesis)
-      : null;
-    const daysSinceGenesis = genesisDate
-      ? Math.floor((new Date() - genesisDate) / (1000 * 60 * 60 * 24))
-      : '?';
-    const sessionNum = l1Data.ephemeral?.session_count || '?';
-    const lastEnd = l1Data.ephemeral?.last_session_end
-      ? new Date(l1Data.ephemeral.last_session_end).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
-      : null;
-    const focus = l1Data.active?.focus || 'No active focus';
-
-    // Brief status to stderr
     if (integrity.valid) {
       const syncInfo = syncStatus.synced ? 'Synced' : `SYNC: ${syncStatus.direction}`;
-      console.error(`[Cordelia] Session ${sessionNum} | Genesis +${daysSinceGenesis}d | Chain OK | ${syncInfo}`);
+      console.error(`[Cordelia] Session ${bannerVars.sessionNum} | Genesis +${bannerVars.daysSinceGenesis}d | Chain OK | ${syncInfo}`);
     } else {
-      console.error(`[Cordelia] Session ${sessionNum} | CHAIN FAILED: ${integrity.reason}`);
+      console.error(`[Cordelia] Session ${bannerVars.sessionNum} | CHAIN FAILED: ${integrity.reason}`);
     }
 
-    // macOS notification
-    let notifTitle, notifMsg;
-    if (integrity.valid) {
-      notifTitle = 'Cordelia Active';
-      notifMsg = `Session ${sessionNum} | Chain verified`;
-    } else {
-      notifTitle = 'Cordelia: INTEGRITY FAILED';
-      notifMsg = integrity.reason;
-    }
-    notify(notifTitle, notifMsg);
-
-    // Full banner to stdout
-    console.log('');
-    console.log('================================================');
-    if (integrity.valid) {
-      console.log(`[CORDELIA] Session ${sessionNum} | Genesis +${daysSinceGenesis}d | Chain: VERIFIED`);
-    } else {
-      console.log(`[CORDELIA] Session ${sessionNum} | Genesis +${daysSinceGenesis}d | Chain: FAILED`);
-      console.log(`[WARNING] ${integrity.reason}`);
-    }
-
-    // Sync status
-    if (!syncStatus.synced) {
-      console.log(`[SYNC] ${syncStatus.message}`);
-      if (syncStatus.direction === 'pull') {
-        console.log(`[SYNC] To pull: curl ${REMOTE_URL}/api/hot/${userId} > memory/L1-hot/${userId}.json`);
-      }
-    } else if (syncStatus.reason) {
-      console.log(`[SYNC] ${syncStatus.reason}`);
-    } else {
-      console.log(`[SYNC] Local and remote in sync`);
-    }
-
-    if (lastEnd) {
-      console.log(`[LAST] ${lastEnd}`);
-    }
-    console.log(`[FOCUS] ${focus}`);
-    if (l1Data.ephemeral?.last_summary) {
-      console.log(`[PREV] ${l1Data.ephemeral.last_summary}`);
-    }
-    if (l1Data.ephemeral?.open_threads?.length > 0) {
-      console.log(`[THREADS] ${l1Data.ephemeral.open_threads.join(', ')}`);
-    }
-    console.log('================================================');
-    console.log('');
-
-    // Output full context for Claude
-    console.log('=== CORDELIA L1 HOT CONTEXT ===');
-    console.log(JSON.stringify(l1Data, null, 2));
-    console.log('=== END CORDELIA CONTEXT ===');
+    sendNotification(integrity, bannerVars.sessionNum);
+    logStatusBanner(integrity, syncStatus, bannerVars, l1Data, userId);
+    outputContextBlock(JSON.stringify(l1Data, null, 2));
 
   } catch (error) {
     notify('Cordelia: ERROR', error.message);
     console.error(`[Cordelia] Unexpected error: ${error.message}`);
-    console.log('=== CORDELIA L1 HOT CONTEXT ===');
-    console.log(`{"error": "${error.message}"}`);
-    console.log('=== END CORDELIA CONTEXT ===');
+    outputContextBlock(`{"error": "${error.message}"}`);
     process.exit(0);
   } finally {
     if (client) {

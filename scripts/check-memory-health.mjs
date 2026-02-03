@@ -189,6 +189,161 @@ async function runCheck(name, level, fn) {
 // Main
 // ---------------------------------------------------------------------------
 
+function preflight() {
+  if (!existsSync(MEMORY_ROOT)) {
+    console.log(`FATAL: Memory root does not exist: ${MEMORY_ROOT}`);
+    process.exit(1);
+  }
+
+  const l1Dir = join(MEMORY_ROOT, 'L1-hot');
+  const l1Files = existsSync(l1Dir) ? readdirSync(l1Dir).filter(f => f.endsWith('.json') && !f.includes('backup')) : [];
+  console.log(`L1 encrypted files: ${l1Files.join(', ') || '(none)'}`);
+
+  const dbPath = join(MEMORY_ROOT, 'cordelia.db');
+  const dbExists = existsSync(dbPath);
+  console.log(`SQLite database: ${dbExists ? 'exists' : 'MISSING'}`);
+  console.log('');
+
+  return { l1Files };
+}
+
+async function runPerUserChecks(activeUsers, l1Data, child, rl, l2Stats) {
+  await runCheck('No L2 items with NULL owner_id', 'FAIL', async () => {
+    const totalItems = l2Stats?.entries || 0;
+    if (totalItems === 0) return;
+
+    let totalPrefetched = 0;
+    for (const u of activeUsers) {
+      const prefetchResp = await sendRequest(child, rl, makeRequest('tools/call', {
+        name: 'memory_prefetch_l2', arguments: { user_id: u, limit: 1 },
+      }));
+      const prefetchData = parseContent(prefetchResp);
+      totalPrefetched += prefetchData.prefetched || 0;
+    }
+
+    assert(totalPrefetched > 0,
+      `${totalItems} L2 items exist but prefetch returns 0 for all active users. ` +
+      'Likely cause: owner_id is NULL on L2 items (run: ' +
+      'sqlite3 cordelia.db "SELECT COUNT(*) FROM l2_items WHERE owner_id IS NULL")');
+  });
+
+  for (const u of activeUsers) {
+    await runCheck(`L2 prefetch returns items for user "${u}"`, 'WARN', async () => {
+      const prefetchResp = await sendRequest(child, rl, makeRequest('tools/call', {
+        name: 'memory_prefetch_l2', arguments: { user_id: u, limit: 5 },
+      }));
+      const prefetchData = parseContent(prefetchResp);
+      assert(prefetchData.prefetched > 0,
+        `Prefetch returned 0 items. User may have no owned L2 items.`);
+    });
+  }
+
+  for (const u of activeUsers) {
+    await runCheck(`Chain integrity for user "${u}"`, 'WARN', async () => {
+      const data = l1Data.get(u);
+      const integrity = data?.ephemeral?.integrity;
+      assert(integrity, 'Missing ephemeral.integrity block');
+      assert(integrity.genesis, 'Missing genesis timestamp');
+      assert(integrity.chain_hash, 'Missing chain_hash');
+
+      const zeroHash = '0000000000000000000000000000000000000000000000000000000000000000';
+      if (integrity.chain_hash === zeroHash) {
+        throw new Error('Chain hash is zeroed (post-repair state). Next session-end hook will recompute.');
+      }
+    });
+  }
+
+  for (const u of activeUsers) {
+    await runCheck(`Session count sanity for user "${u}"`, 'WARN', async () => {
+      const data = l1Data.get(u);
+      const count = data?.ephemeral?.session_count;
+      assert(typeof count === 'number', `session_count is not a number: ${count}`);
+      assert(count > 0, `session_count is ${count}`);
+      assert(count < 10000, `session_count suspiciously high: ${count}`);
+
+      const genesis = data?.ephemeral?.integrity?.genesis;
+      if (genesis) {
+        const daysSinceGenesis = (Date.now() - new Date(genesis).getTime()) / (1000 * 60 * 60 * 24);
+        const sessionsPerDay = count / Math.max(daysSinceGenesis, 1);
+        if (sessionsPerDay > 50) {
+          throw new Error(
+            `${sessionsPerDay.toFixed(1)} sessions/day (${count} sessions in ${daysSinceGenesis.toFixed(1)} days). ` +
+            'Possible runaway session counter.'
+          );
+        }
+      }
+    });
+  }
+}
+
+async function runGroupMembershipCheck(activeUsers, l1Data, child, rl) {
+  await runCheck('Group membership includes active users', 'WARN', async () => {
+    const groupListResp = await sendRequest(child, rl, makeRequest('tools/call', {
+      name: 'memory_group_list', arguments: {},
+    }));
+    const groupData = parseContent(groupListResp);
+    if (groupData.count === 0) return;
+
+    for (const group of groupData.groups) {
+      const groupResp = await sendRequest(child, rl, makeRequest('tools/call', {
+        name: 'memory_group_read', arguments: { group_id: group.id },
+      }));
+      const detail = parseContent(groupResp);
+      const memberIds = (detail.members || []).map(m => m.entity_id);
+
+      for (const memberId of memberIds) {
+        const memberData = l1Data.get(memberId);
+        if (!memberData) continue;
+        if (memberData.identity?.id?.includes('DEPRECATED') ||
+            memberData.active?.focus?.includes('DEPRECATED')) {
+          throw new Error(
+            `Deprecated user "${memberId}" is still a member of group "${group.id}". ` +
+            'Remove with memory_group_remove_member.'
+          );
+        }
+      }
+    }
+  });
+}
+
+function printReport() {
+  console.log('\n--- Results ---');
+
+  const passed = results.filter(r => r.pass).length;
+  const failed = results.filter(r => !r.pass && r.level === 'FAIL').length;
+  const warned = results.filter(r => !r.pass && r.level === 'WARN').length;
+
+  console.log(`${passed} passed, ${failed} failed, ${warned} warnings (${results.length} total)\n`);
+
+  if (failed > 0) {
+    console.log('FAILURES (must fix before upgrade):');
+    for (const r of results.filter(r => !r.pass && r.level === 'FAIL')) {
+      console.log(`  - ${r.name}: ${r.error}`);
+    }
+    console.log('');
+  }
+
+  if (warned > 0) {
+    console.log('WARNINGS (review before upgrade):');
+    for (const r of results.filter(r => !r.pass && r.level === 'WARN')) {
+      console.log(`  - ${r.name}: ${r.error}`);
+    }
+    console.log('');
+  }
+
+  if (failed > 0) {
+    console.log('=== HEALTH CHECK FAILED ===');
+    console.log('Do NOT proceed with upgrade until failures are resolved.');
+    process.exit(1);
+  } else if (warned > 0) {
+    console.log('=== HEALTH CHECK PASSED WITH WARNINGS ===');
+    process.exit(2);
+  } else {
+    console.log('=== HEALTH CHECK PASSED ===');
+    process.exit(0);
+  }
+}
+
 async function main() {
   const globalDeadline = setTimeout(() => {
     console.log('\nFATAL: Global timeout exceeded');
@@ -198,22 +353,7 @@ async function main() {
   console.log('\n=== Cordelia Memory Health Check ===');
   console.log(`Memory root: ${MEMORY_ROOT}\n`);
 
-  // Pre-flight: check memory root exists
-  if (!existsSync(MEMORY_ROOT)) {
-    console.log(`FATAL: Memory root does not exist: ${MEMORY_ROOT}`);
-    process.exit(1);
-  }
-
-  // Pre-flight: check encrypted L1 files exist
-  const l1Dir = join(MEMORY_ROOT, 'L1-hot');
-  const l1Files = existsSync(l1Dir) ? readdirSync(l1Dir).filter(f => f.endsWith('.json') && !f.includes('backup')) : [];
-  console.log(`L1 encrypted files: ${l1Files.join(', ') || '(none)'}`);
-
-  // Pre-flight: check SQLite DB exists
-  const dbPath = join(MEMORY_ROOT, 'cordelia.db');
-  const dbExists = existsSync(dbPath);
-  console.log(`SQLite database: ${dbExists ? 'exists' : 'MISSING'}`);
-  console.log('');
+  const { l1Files } = preflight();
 
   // Start MCP server
   const encryptionKey = extractEncryptionKey();
@@ -314,84 +454,10 @@ async function main() {
     });
 
     // -----------------------------------------------------------------------
-    // CHECK 4: L2 orphaned items (owner_id = NULL)
+    // CHECKS 4-7: Per-user checks (L2 orphans, prefetch, chain, sessions)
     // -----------------------------------------------------------------------
     const l2Stats = statusData?.layers?.L2_warm;
-    await runCheck('No L2 items with NULL owner_id', 'FAIL', async () => {
-      const totalItems = l2Stats?.entries || 0;
-      if (totalItems === 0) return; // No items to check
-
-      let totalPrefetched = 0;
-      for (const u of activeUsers) {
-        const prefetchResp = await sendRequest(child, rl, makeRequest('tools/call', {
-          name: 'memory_prefetch_l2', arguments: { user_id: u, limit: 1 },
-        }));
-        const prefetchData = parseContent(prefetchResp);
-        totalPrefetched += prefetchData.prefetched || 0;
-      }
-
-      assert(totalPrefetched > 0,
-        `${totalItems} L2 items exist but prefetch returns 0 for all active users. ` +
-        'Likely cause: owner_id is NULL on L2 items (run: ' +
-        'sqlite3 cordelia.db "SELECT COUNT(*) FROM l2_items WHERE owner_id IS NULL")');
-    });
-
-    // -----------------------------------------------------------------------
-    // CHECK 5: L2 prefetch returns items for active users
-    // -----------------------------------------------------------------------
-    for (const u of activeUsers) {
-      await runCheck(`L2 prefetch returns items for user "${u}"`, 'WARN', async () => {
-        const prefetchResp = await sendRequest(child, rl, makeRequest('tools/call', {
-          name: 'memory_prefetch_l2', arguments: { user_id: u, limit: 5 },
-        }));
-        const prefetchData = parseContent(prefetchResp);
-        assert(prefetchData.prefetched > 0,
-          `Prefetch returned 0 items. User may have no owned L2 items.`);
-      });
-    }
-
-    // -----------------------------------------------------------------------
-    // CHECK 6: Chain integrity for each active user
-    // -----------------------------------------------------------------------
-    for (const u of activeUsers) {
-      await runCheck(`Chain integrity for user "${u}"`, 'WARN', async () => {
-        const data = l1Data.get(u);
-        const integrity = data?.ephemeral?.integrity;
-        assert(integrity, 'Missing ephemeral.integrity block');
-        assert(integrity.genesis, 'Missing genesis timestamp');
-        assert(integrity.chain_hash, 'Missing chain_hash');
-
-        const zeroHash = '0000000000000000000000000000000000000000000000000000000000000000';
-        if (integrity.chain_hash === zeroHash) {
-          throw new Error('Chain hash is zeroed (post-repair state). Next session-end hook will recompute.');
-        }
-      });
-    }
-
-    // -----------------------------------------------------------------------
-    // CHECK 7: Session count sanity
-    // -----------------------------------------------------------------------
-    for (const u of activeUsers) {
-      await runCheck(`Session count sanity for user "${u}"`, 'WARN', async () => {
-        const data = l1Data.get(u);
-        const count = data?.ephemeral?.session_count;
-        assert(typeof count === 'number', `session_count is not a number: ${count}`);
-        assert(count > 0, `session_count is ${count}`);
-        assert(count < 10000, `session_count suspiciously high: ${count}`);
-
-        const genesis = data?.ephemeral?.integrity?.genesis;
-        if (genesis) {
-          const daysSinceGenesis = (Date.now() - new Date(genesis).getTime()) / (1000 * 60 * 60 * 24);
-          const sessionsPerDay = count / Math.max(daysSinceGenesis, 1);
-          if (sessionsPerDay > 50) {
-            throw new Error(
-              `${sessionsPerDay.toFixed(1)} sessions/day (${count} sessions in ${daysSinceGenesis.toFixed(1)} days). ` +
-              'Possible runaway session counter.'
-            );
-          }
-        }
-      });
-    }
+    await runPerUserChecks(activeUsers, l1Data, child, rl, l2Stats);
 
     // -----------------------------------------------------------------------
     // CHECK 8: L2 search functional
@@ -501,80 +567,14 @@ async function main() {
     // -----------------------------------------------------------------------
     // CHECK 12: Group membership consistency
     // -----------------------------------------------------------------------
-    await runCheck('Group membership includes active users', 'WARN', async () => {
-      const groupListResp = await sendRequest(child, rl, makeRequest('tools/call', {
-        name: 'memory_group_list', arguments: {},
-      }));
-      const groupData = parseContent(groupListResp);
-      if (groupData.count === 0) return; // No groups, nothing to check
-
-      for (const group of groupData.groups) {
-        const groupResp = await sendRequest(child, rl, makeRequest('tools/call', {
-          name: 'memory_group_read', arguments: { group_id: group.id },
-        }));
-        const detail = parseContent(groupResp);
-        const memberIds = (detail.members || []).map(m => m.entity_id);
-
-        // Check no deprecated users are group members
-        // Only flag users we can read and confirm are deprecated (not users
-        // whose L1 we can't decrypt -- they may use a different key)
-        for (const memberId of memberIds) {
-          const memberData = l1Data.get(memberId);
-          if (!memberData) continue; // Can't read = different key, not deprecated
-          if (memberData.identity?.id?.includes('DEPRECATED') ||
-              memberData.active?.focus?.includes('DEPRECATED')) {
-            throw new Error(
-              `Deprecated user "${memberId}" is still a member of group "${group.id}". ` +
-              'Remove with memory_group_remove_member.'
-            );
-          }
-        }
-      }
-    });
+    await runGroupMembershipCheck(activeUsers, l1Data, child, rl);
 
   } finally {
     child.kill('SIGTERM');
     clearTimeout(globalDeadline);
   }
 
-  // -----------------------------------------------------------------------
-  // Report
-  // -----------------------------------------------------------------------
-  console.log('\n--- Results ---');
-
-  const passed = results.filter(r => r.pass).length;
-  const failed = results.filter(r => !r.pass && r.level === 'FAIL').length;
-  const warned = results.filter(r => !r.pass && r.level === 'WARN').length;
-
-  console.log(`${passed} passed, ${failed} failed, ${warned} warnings (${results.length} total)\n`);
-
-  if (failed > 0) {
-    console.log('FAILURES (must fix before upgrade):');
-    for (const r of results.filter(r => !r.pass && r.level === 'FAIL')) {
-      console.log(`  - ${r.name}: ${r.error}`);
-    }
-    console.log('');
-  }
-
-  if (warned > 0) {
-    console.log('WARNINGS (review before upgrade):');
-    for (const r of results.filter(r => !r.pass && r.level === 'WARN')) {
-      console.log(`  - ${r.name}: ${r.error}`);
-    }
-    console.log('');
-  }
-
-  if (failed > 0) {
-    console.log('=== HEALTH CHECK FAILED ===');
-    console.log('Do NOT proceed with upgrade until failures are resolved.');
-    process.exit(1);
-  } else if (warned > 0) {
-    console.log('=== HEALTH CHECK PASSED WITH WARNINGS ===');
-    process.exit(2);
-  } else {
-    console.log('=== HEALTH CHECK PASSED ===');
-    process.exit(0);
-  }
+  printReport();
 }
 
 main().catch((e) => {

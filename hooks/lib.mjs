@@ -112,6 +112,33 @@ function getConfigPath() {
 }
 
 /**
+ * Extract the value from a raw TOML value string, handling quotes and inline comments.
+ */
+function extractTOMLValue(raw) {
+  const dqMatch = raw.match(/^"([^"]*)"/);
+  if (dqMatch) return dqMatch[1];
+
+  const sqMatch = raw.match(/^'([^']*)'/);
+  if (sqMatch) return sqMatch[1];
+
+  const commentIdx = raw.indexOf('#');
+  if (commentIdx > 0) return raw.slice(0, commentIdx).trim();
+
+  return raw;
+}
+
+/**
+ * Assign a key-value pair into the result, respecting current section scope.
+ */
+function assignTOMLEntry(result, currentSection, key, value) {
+  if (currentSection) {
+    result[currentSection][key] = value;
+  } else {
+    result[key] = value;
+  }
+}
+
+/**
  * Minimal TOML parser for flat key-value pairs with [section] headers.
  * Handles: strings (quoted and unquoted), sections, comments, blank lines.
  * Does NOT handle: arrays, inline tables, multiline strings, nested tables.
@@ -123,10 +150,8 @@ export function parseTOML(text) {
   for (const rawLine of text.split('\n')) {
     const line = rawLine.trim();
 
-    // Skip blank lines and comments
     if (!line || line.startsWith('#')) continue;
 
-    // Section header
     const sectionMatch = line.match(/^\[([^\]]+)\]$/);
     if (sectionMatch) {
       currentSection = sectionMatch[1].trim();
@@ -134,32 +159,11 @@ export function parseTOML(text) {
       continue;
     }
 
-    // Key = value
     const kvMatch = line.match(/^([^=]+?)\s*=\s*(.+)$/);
     if (kvMatch) {
       const key = kvMatch[1].trim();
-      let value = kvMatch[2].trim();
-
-      // Handle quoted strings (extract content between quotes, ignore inline comments)
-      const dqMatch = value.match(/^"([^"]*)"/)
-      const sqMatch = value.match(/^'([^']*)'/)
-      if (dqMatch) {
-        value = dqMatch[1];
-      } else if (sqMatch) {
-        value = sqMatch[1];
-      } else {
-        // Unquoted: strip inline comments
-        const commentIdx = value.indexOf('#');
-        if (commentIdx > 0) {
-          value = value.slice(0, commentIdx).trim();
-        }
-      }
-
-      if (currentSection) {
-        result[currentSection][key] = value;
-      } else {
-        result[key] = value;
-      }
+      const value = extractTOMLValue(kvMatch[2].trim());
+      assignTOMLEntry(result, currentSection, key, value);
     }
   }
 
