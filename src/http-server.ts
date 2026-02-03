@@ -1129,10 +1129,10 @@ app.post('/api/enroll', async (req: Request, res: Response) => {
     return;
   }
 
-  // Normalize user code
+  // Normalize and strictly validate user code (alphanumeric only, 8 chars)
   const normalizedCode = user_code.replace(/-/g, '').toUpperCase();
-  if (normalizedCode.length !== 8) {
-    res.status(400).json({ error: 'Invalid user_code format. Expected 8 characters (e.g. ABCD-EFGH)' });
+  if (!/^[A-Z0-9]{8}$/.test(normalizedCode)) {
+    res.status(400).json({ error: 'Invalid user_code format. Expected 8 alphanumeric characters (e.g. ABCD-EFGH)' });
     return;
   }
   const formattedCode = `${normalizedCode.slice(0, 4)}-${normalizedCode.slice(4)}`;
@@ -1176,7 +1176,7 @@ app.post('/api/enroll', async (req: Request, res: Response) => {
     let entityId = '';
 
     while (!authorized && (Date.now() - startTime) < MAX_POLL_DURATION_MS) {
-      const pollUrl = `${portalBase}/api/enroll/poll-user/${formattedCode}`;
+      const pollUrl = `${portalBase}/api/enroll/poll-user/${encodeURIComponent(formattedCode)}`;
       const pollResp = await fetch(pollUrl);
 
       if (!pollResp.ok) {
