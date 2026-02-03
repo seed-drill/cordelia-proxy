@@ -1175,9 +1175,11 @@ app.post('/api/enroll', async (req: Request, res: Response) => {
     let accessToken = '';
     let entityId = '';
 
+    // Build poll URL once using URL constructor (safe from path injection)
+    const safePollUrl = new URL(`/api/enroll/poll-user/${encodeURIComponent(formattedCode)}`, portalBase); // NOSONAR: formattedCode is validated as ^[A-Z0-9]{4}-[A-Z0-9]{4}$
+
     while (!authorized && (Date.now() - startTime) < MAX_POLL_DURATION_MS) {
-      const pollUrl = `${portalBase}/api/enroll/poll-user/${encodeURIComponent(formattedCode)}`;
-      const pollResp = await fetch(pollUrl);
+      const pollResp = await fetch(safePollUrl.href);
 
       if (!pollResp.ok) {
         const errBody = await pollResp.json().catch(() => ({ error: 'unknown' })) as { error?: string; detail?: string };
