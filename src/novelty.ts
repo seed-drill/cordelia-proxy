@@ -49,8 +49,8 @@ export interface NoveltyExtract {
  */
 const NOVELTY_PATTERNS: Array<[RegExp, NoveltySignal, number, string?]> = [
   // Corrections - high signal
-  [/actually[,\s]+(?:i|my|we|it['']?s)/i, 'correction', 0.9],
-  [/that['']?s (?:not quite|wrong|incorrect)/i, 'correction', 0.9],
+  [/actually[,\s]+(?:i|my|we|it'?s)/i, 'correction', 0.9],
+  [/that'?s (?:not quite|wrong|incorrect)/i, 'correction', 0.9],
   [/let me correct/i, 'correction', 0.9],
   [/to clarify[,:]?\s/i, 'correction', 0.8],
   [/i (?:meant|mean)\s/i, 'correction', 0.7],
@@ -59,7 +59,7 @@ const NOVELTY_PATTERNS: Array<[RegExp, NoveltySignal, number, string?]> = [
   [/i (?:prefer|like|want|need)\s/i, 'preference', 0.8, 'prefs'],
   [/(?:always|never|usually)\s+(?:do|use|want)/i, 'preference', 0.7, 'prefs'],
   [/my (?:preference|style|approach) is/i, 'preference', 0.9, 'prefs'],
-  [/don['']?t (?:like|want|need)/i, 'preference', 0.7, 'prefs'],
+  [/don'?t (?:like|want|need)/i, 'preference', 0.7, 'prefs'],
 
   // New entities - people, projects, concepts
   [/(?:this is|meet|introducing)\s+([A-Z][a-z]+)/i, 'entity_new', 0.8],
@@ -67,20 +67,20 @@ const NOVELTY_PATTERNS: Array<[RegExp, NoveltySignal, number, string?]> = [
   [/working with\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i, 'entity_new', 0.6],
 
   // Decisions
-  [/(?:let['']?s|we['']?ll|i['']?ll|decided to)\s+(?:go with|use|do)/i, 'decision', 0.8],
+  [/(?:let'?s|we'?ll|i'?ll|decided to)\s+(?:go with|use|do)/i, 'decision', 0.8],
   [/the decision is/i, 'decision', 0.9],
-  [/we['']?re going (?:to|with)/i, 'decision', 0.7],
+  [/we'?re going (?:to|with)/i, 'decision', 0.7],
 
   // Insights and realizations
-  [/i['']?ve (?:noticed|realized|learned)/i, 'insight', 0.9, 'active.notes'],
+  [/i'?ve (?:noticed|realized|learned)/i, 'insight', 0.9, 'active.notes'],
   [/(?:key|important) (?:insight|learning|takeaway)/i, 'insight', 0.9, 'active.notes'],
-  [/pattern (?:i['']?ve|we['']?ve) (?:seen|noticed)/i, 'insight', 0.8, 'active.notes'],
+  [/pattern (?:i'?ve|we'?ve) (?:seen|noticed)/i, 'insight', 0.8, 'active.notes'],
   [/this (?:reminds me|connects to|relates to)/i, 'insight', 0.6],
 
   // Blockers
   [/(?:blocked|stuck|waiting) (?:on|by|for)/i, 'blocker', 0.9, 'active.blockers'],
   [/(?:blocker|impediment|obstacle):/i, 'blocker', 0.9, 'active.blockers'],
-  [/can['']?t (?:proceed|continue|move forward)/i, 'blocker', 0.8, 'active.blockers'],
+  [/can'?t (?:proceed|continue|move forward)/i, 'blocker', 0.8, 'active.blockers'],
   [/unblocked|resolved the/i, 'blocker', 0.8, 'active.blockers'],
 
   // Key references

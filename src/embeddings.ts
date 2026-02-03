@@ -45,8 +45,8 @@ const OLLAMA_TIMEOUT_MS = 5000;
 
 export class OllamaProvider implements EmbeddingProvider {
   name = 'ollama';
-  private url: string;
-  private model: string;
+  private readonly url: string;
+  private readonly model: string;
   private dims: number | null = null;
   private available: boolean | null = null;
 

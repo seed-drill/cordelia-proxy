@@ -35,7 +35,7 @@ export interface PolicyEngine {
  * R3 replaces this with DistributedPolicyEngine behind the same interface.
  */
 export class InlinePolicyEngine implements PolicyEngine {
-  private storage: StorageProvider;
+  private readonly storage: StorageProvider;
 
   constructor(storage?: StorageProvider) {
     this.storage = storage || getStorageProvider();

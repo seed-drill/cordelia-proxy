@@ -175,7 +175,4 @@ async function run() {
   if (failed > 0) process.exit(1);
 }
 
-run().catch((e) => {
-  console.error('Runner error:', e.message);
-  process.exit(1);
-});
+await run();

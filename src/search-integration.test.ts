@@ -201,7 +201,4 @@ async function runTests(): Promise<void> {
   }
 }
 
-runTests().catch((e) => {
-  console.error('Test runner error:', e);
-  process.exit(1);
-});
+await runTests();

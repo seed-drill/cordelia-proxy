@@ -762,62 +762,59 @@ Does this look right? Ready to turn it on again?`,
       }
     }
 
-    async function handleInput(value) {
-      stopCountdown();
-      const step = steps[currentStep];
-
-      // Transform value if needed
-      if (step.transform) {
-        value = step.transform(value);
-      }
-
-      // Validate
-      if (step.validate && !step.validate(value)) {
-        addMessage(step.errorMsg || 'Hmm, that doesn\'t look quite right. Try again?', 'rutherford');
-        if (step.countdown) startCountdown(step.countdown);
-        return;
-      }
-
-      // Show user message
+    function displayInputValue(value, step) {
       if (Array.isArray(value)) {
         if (value.length) addMessage(value.join(', '), 'user');
         else if (!step.optional) addMessage('(none)', 'user');
       } else {
         addMessage(String(value), 'user');
       }
+    }
 
-      // Store value
+    /** Returns true if mode was handled (caller should return). */
+    async function handlePreCheckMode(value) {
+      if (value === 'upload') { await handleUploadMode(); return true; }
+      if (value === 'bare') { await handleBareMode(); return true; }
+      return false;
+    }
+
+    async function handleSummaryConfirmation(value) {
+      if (value === 'yes') {
+        await createProfile();
+      } else {
+        currentStep = 0;
+        userData = {
+          name: '', github_id: authData?.username || '', roles: [], org_name: '', org_role: '',
+          style: [], key_refs: [], heroes: [], planning_mode: 'important',
+          verbosity: 'concise', emoji: false,
+        };
+        messagesEl.innerHTML = '';
+        showStep(steps[0]);
+      }
+    }
+
+    async function handleInput(value) {
+      stopCountdown();
+      const step = steps[currentStep];
+
+      if (step.transform) value = step.transform(value);
+
+      if (step.validate && !step.validate(value)) {
+        addMessage(step.errorMsg || 'Hmm, that doesn\'t look quite right. Try again?', 'rutherford');
+        if (step.countdown) startCountdown(step.countdown);
+        return;
+      }
+
+      displayInputValue(value, step);
+
       if (step.field && step.field !== 'confirm') {
         userData[step.field] = value;
       }
 
-      // Handle pre-check mode selection
-      if (step.id === 'pre_check') {
-        if (value === 'upload') {
-          await handleUploadMode();
-          return;
-        } else if (value === 'bare') {
-          await handleBareMode();
-          return;
-        }
-        // 'genesis' continues to next step
-      }
+      if (step.id === 'pre_check' && await handlePreCheckMode(value)) return;
 
-      // Handle confirmation
       if (step.id === 'summary') {
-        if (value === 'yes') {
-          await createProfile();
-        } else {
-          // Reset and start over
-          currentStep = 0;
-          userData = {
-            name: '', github_id: authData?.username || '', roles: [], org_name: '', org_role: '',
-            style: [], key_refs: [], heroes: [], planning_mode: 'important',
-            verbosity: 'concise', emoji: false,
-          };
-          messagesEl.innerHTML = '';
-          showStep(steps[0]);
-        }
+        await handleSummaryConfirmation(value);
         return;
       }
 

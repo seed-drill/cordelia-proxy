@@ -627,7 +627,6 @@ app.put('/api/hot/:userId', async (req: Request, res: Response) => {
         res.status(403).json({ error: 'forbidden', detail: 'Can only update your own profile' });
         return;
       }
-      isAuthorized = true;
     }
 
     // Validate the incoming context
@@ -736,7 +735,7 @@ app.post('/api/signup', async (req: Request, res: Response) => {
       // If already in correct format, use as-is
       if (/^[a-z_]+:[a-z0-9_]+$/.test(ref)) return ref;
       // Otherwise, try to normalize it
-      return ref.toLowerCase().replace(/[^a-z0-9:]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+      return ref.toLowerCase().replace(/[^a-z0-9:]/g, '_').replace(/_+/g, '_').replace(/(^_)|(_$)/g, '');
     }).filter((ref: string) => /^[a-z_]+:[a-z0-9_]+$/.test(ref));
 
     // Accept either github_id or username for user identification
@@ -1151,6 +1150,18 @@ type PollResult =
   | { authorized: true; accessToken: string; entityId: string; deviceId: string }
   | { authorized: false; error?: { status: number; body: { error: string; detail: string } } };
 
+const POLL_ERROR_MAP: Record<string, { status: number; error: string; detail: string }> = {
+  expired_token: { status: 410, error: 'expired', detail: 'Enrollment code has expired' },
+  access_denied: { status: 403, error: 'denied', detail: 'Enrollment was denied by the portal admin' },
+  invalid_user_code: { status: 404, error: 'invalid_code', detail: 'User code not found on portal' },
+};
+
+function mapPollError(errBody: { error?: string }): PollResult | null {
+  const mapping = errBody.error ? POLL_ERROR_MAP[errBody.error] : undefined;
+  if (!mapping) return null;
+  return { authorized: false, error: { status: mapping.status, body: { error: mapping.error, detail: mapping.detail } } };
+}
+
 async function pollForAuthorization(
   pollUrl: string,
   pollIntervalMs: number,
@@ -1163,15 +1174,8 @@ async function pollForAuthorization(
 
     if (!pollResp.ok) {
       const errBody = await pollResp.json().catch(() => ({ error: 'unknown' })) as { error?: string; detail?: string };
-      if (errBody.error === 'expired_token') {
-        return { authorized: false, error: { status: 410, body: { error: 'expired', detail: 'Enrollment code has expired' } } };
-      }
-      if (errBody.error === 'access_denied') {
-        return { authorized: false, error: { status: 403, body: { error: 'denied', detail: 'Enrollment was denied by the portal admin' } } };
-      }
-      if (errBody.error === 'invalid_user_code') {
-        return { authorized: false, error: { status: 404, body: { error: 'invalid_code', detail: 'User code not found on portal' } } };
-      }
+      const mapped = mapPollError(errBody);
+      if (mapped) return mapped;
       await new Promise(r => setTimeout(r, pollIntervalMs));
       continue;
     }

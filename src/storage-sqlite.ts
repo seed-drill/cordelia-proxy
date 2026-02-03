@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS integrity_canary (
 export class SqliteStorageProvider implements StorageProvider {
   readonly name = 'sqlite';
   private db!: Database.Database;
-  private dbPath: string;
+  private readonly dbPath: string;
   private vecLoaded = false;
 
   constructor(memoryRoot: string) {

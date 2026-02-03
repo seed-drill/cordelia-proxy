@@ -25,7 +25,7 @@ const HEALTH_CHECK_INTERVAL_MS = 30_000;
 export class NodeStorageProvider implements StorageProvider {
   name = 'node';
 
-  private client: NodeClient;
+  private readonly client: NodeClient;
   private local: StorageProvider;
   private _nodeAvailable = false;
   private _lastHealthCheck = 0;
@@ -37,7 +37,7 @@ export class NodeStorageProvider implements StorageProvider {
     this._memoryRoot = memoryRoot;
   }
 
-  private _memoryRoot: string;
+  private readonly _memoryRoot: string;
 
   async initialize(): Promise<void> {
     // Initialize local SQLite as fallback for local-only ops and when node is down

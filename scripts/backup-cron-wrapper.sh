@@ -21,7 +21,7 @@ set -euo pipefail
 
 ENV_FILE="$HOME/.cordelia-env"
 
-if [ ! -f "$ENV_FILE" ]; then
+if [[ ! -f "$ENV_FILE" ]]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ERROR: $ENV_FILE not found" >> /Users/russellwing/cordelia/logs/backup-memory.log
     exit 1
 fi

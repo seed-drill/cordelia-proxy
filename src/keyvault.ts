@@ -18,7 +18,7 @@ export interface KeyVault {
  * Satisfies the interface contract so R3 can swap in a real implementation.
  */
 export class SharedKeyVault implements KeyVault {
-  private masterKey: Buffer;
+  private readonly masterKey: Buffer;
 
   constructor(masterKey?: Buffer) {
     // Use provided key or a deterministic dummy for R2

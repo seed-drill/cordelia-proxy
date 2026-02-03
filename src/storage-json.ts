@@ -11,7 +11,7 @@ import type { StorageProvider, L2ItemMeta, GroupRow, GroupMemberRow, AccessLogEn
 
 export class JsonStorageProvider implements StorageProvider {
   readonly name = 'json';
-  private memoryRoot: string;
+  private readonly memoryRoot: string;
 
   constructor(memoryRoot: string) {
     this.memoryRoot = memoryRoot;
@@ -103,7 +103,10 @@ export class JsonStorageProvider implements StorageProvider {
   }
 
   async writeL2Item(id: string, type: string, data: Buffer, _meta: L2ItemMeta): Promise<void> {
-    const subdir = type === 'entity' ? 'entities' : type === 'session' ? 'sessions' : 'learnings';
+    let subdir: string;
+    if (type === 'entity') subdir = 'entities';
+    else if (type === 'session') subdir = 'sessions';
+    else subdir = 'learnings';
     const filePath = path.join(this.memoryRoot, 'L2-warm', subdir, `${id}.json`);
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.writeFile(filePath, data);

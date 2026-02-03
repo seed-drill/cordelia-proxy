@@ -135,6 +135,39 @@ function verifyChainHash(l1Data: Record<string, unknown>, label: string): string
   return label;
 }
 
+function verifyL1User(
+  raw: string,
+  label: string,
+  skipLabel: string,
+  verified: string[],
+  skipped: string[],
+): void {
+  const parsed = tryParseL1(raw, label);
+  if (parsed.status === 'skip') {
+    skipped.push(parsed.reason);
+    return;
+  }
+  const result = verifyChainHash(parsed.l1Data, skipLabel);
+  if (result === null) {
+    skipped.push(`${skipLabel} (no integrity block)`);
+  } else {
+    verified.push(result);
+  }
+}
+
+function verifyJsonFileUsers(verified: string[], skipped: string[]): void {
+  if (!fs.existsSync(L1_DIR)) return;
+
+  const jsonFiles = fs.readdirSync(L1_DIR).filter(f => f.endsWith('.json'));
+  for (const file of jsonFiles) {
+    const userId = path.basename(file, '.json');
+    if (verified.includes(userId) || skipped.some(s => s.startsWith(userId))) continue;
+
+    const raw = fs.readFileSync(path.join(L1_DIR, file), 'utf-8');
+    verifyL1User(raw, `${userId} (JSON parse failed)`, `${userId} (json)`, verified, skipped);
+  }
+}
+
 check('L1 chain hash (all users)', () => {
   const users = db.prepare('SELECT user_id, data FROM l1_hot').all() as Array<{ user_id: string; data: Buffer }>;
   if (users.length === 0) throw new Error('No L1 users in SQLite');
@@ -143,41 +176,10 @@ check('L1 chain hash (all users)', () => {
   const skipped: string[] = [];
 
   for (const user of users) {
-    const parsed = tryParseL1(user.data.toString('utf-8'), `${user.user_id} (encrypted in db)`);
-    if (parsed.status === 'skip') {
-      skipped.push(parsed.reason);
-      continue;
-    }
-
-    const result = verifyChainHash(parsed.l1Data, user.user_id);
-    if (result === null) {
-      skipped.push(`${user.user_id} (no integrity block)`);
-    } else {
-      verified.push(result);
-    }
+    verifyL1User(user.data.toString('utf-8'), `${user.user_id} (encrypted in db)`, user.user_id, verified, skipped);
   }
 
-  if (fs.existsSync(L1_DIR)) {
-    const jsonFiles = fs.readdirSync(L1_DIR).filter(f => f.endsWith('.json'));
-    for (const file of jsonFiles) {
-      const userId = path.basename(file, '.json');
-      if (verified.includes(userId) || skipped.some(s => s.startsWith(userId))) continue;
-
-      const raw = fs.readFileSync(path.join(L1_DIR, file), 'utf-8');
-      const parsed = tryParseL1(raw, `${userId} (JSON parse failed)`);
-      if (parsed.status === 'skip') {
-        skipped.push(parsed.reason);
-        continue;
-      }
-
-      const result = verifyChainHash(parsed.l1Data, `${userId} (json)`);
-      if (result === null) {
-        skipped.push(`${userId} (json, no integrity)`);
-      } else {
-        verified.push(result);
-      }
-    }
-  }
+  verifyJsonFileUsers(verified, skipped);
 
   return `verified: [${verified.join(', ')}], skipped: [${skipped.join(', ')}]`;
 });
@@ -243,8 +245,9 @@ check('Group tables', () => {
   if (groups.length === 0) throw new Error('No groups found');
 
   const detail = groups.map(g => {
-    const m = members.filter(m => m.group_id === g.id);
-    return `${g.name} (${g.id}): ${m.map(m => `${m.entity_id}[${m.role}]`).join(', ')}`;
+    const groupMembers = members.filter(m => m.group_id === g.id);
+    const memberList = groupMembers.map(m => `${m.entity_id}[${m.role}]`).join(', ');
+    return `${g.name} (${g.id}): ${memberList}`;
   }).join('; ');
 
   return detail;

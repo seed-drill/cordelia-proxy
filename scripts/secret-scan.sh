@@ -28,7 +28,7 @@ for pattern in "${PATTERNS[@]}"; do
   # Search tracked files only
   MATCHES=$(git -C "$REPO_ROOT" grep -lPi "$pattern" -- ':(exclude)node_modules' ':(exclude)dist' ':(exclude)package-lock.json' ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)
 
-  if [ -n "$MATCHES" ]; then
+  if [[ -n "$MATCHES" ]]; then
     while IFS= read -r file; do
       echo "ALERT: Potential secret in $file (pattern: $pattern)"
       FOUND=1
@@ -36,7 +36,7 @@ for pattern in "${PATTERNS[@]}"; do
   fi
 done
 
-if [ "$FOUND" -eq 1 ]; then
+if [[ "$FOUND" -eq 1 ]]; then
   echo ""
   echo "Secret scan FAILED. Review flagged files above."
   echo "If these are false positives, update scripts/secret-scan.sh exclusions."

@@ -557,6 +557,33 @@ function wrapSearchResults(
   return results;
 }
 
+async function scoreCandidate(
+  id: string,
+  ctx: SearchContext,
+  ftsScores: Map<string, number>,
+  vecScores: Map<string, number>,
+  hasSemanticScores: boolean,
+  type?: L2ItemType,
+  tags?: string[],
+  domainFilter?: MemoryDomain,
+): Promise<{ result: SearchResult; debug: { id: string; fts_score: number; vec_score: number; combined_score: number } } | null> {
+  const entry = ctx.entryMap.get(id) ?? await resolveEntry(id, ctx.storage);
+  if (!entry || !filterEntryByOptions(entry, type, tags, domainFilter)) return null;
+
+  const kw = ftsScores.get(id) || 0;
+  const sem = vecScores.get(id) || 0;
+  const score = computeHybridScore(kw, sem, hasSemanticScores, entry.domain);
+  if (score === 0) return null;
+
+  return {
+    result: {
+      id: entry.id, type: entry.type, subtype: entry.subtype,
+      name: entry.name, tags: entry.tags, path: entry.path, score, domain: entry.domain,
+    },
+    debug: { id: entry.id, fts_score: kw, vec_score: sem, combined_score: score },
+  };
+}
+
 /**
  * Search implementation: FTS5 BM25 + optional sqlite-vec cosine similarity.
  * 70/30 dominant-signal hybrid weighting when both are available.
@@ -594,34 +621,12 @@ async function searchImpl(options: SearchOptions): Promise<SearchResult[] | { re
   const debugScores: Array<{ id: string; fts_score: number; vec_score: number; combined_score: number }> = [];
 
   for (const id of candidateIds) {
-    let entry: L2IndexEntry | undefined = ctx.entryMap.get(id);
-    if (!entry) {
-      const resolved = await resolveEntry(id, ctx.storage);
-      if (!resolved) continue;
-      entry = resolved;
-    }
+    const scored = await scoreCandidate(id, ctx, ftsScores, vecScores, hasSemanticScores, type, tags, domainFilter);
+    if (!scored) continue;
 
-    if (!filterEntryByOptions(entry, type, tags, domainFilter)) continue;
-
-    const kw = ftsScores.get(id) || 0;
-    const sem = vecScores.get(id) || 0;
-    const score = computeHybridScore(kw, sem, hasSemanticScores, entry.domain);
-
-    if (score === 0) continue;
-
-    results.push({
-      id: entry.id,
-      type: entry.type,
-      subtype: entry.subtype,
-      name: entry.name,
-      tags: entry.tags,
-      path: entry.path,
-      score,
-      domain: entry.domain,
-    });
-
+    results.push(scored.result);
     if (debug) {
-      debugScores.push({ id: entry.id, fts_score: kw, vec_score: sem, combined_score: score });
+      debugScores.push(scored.debug);
     }
   }
 
@@ -665,7 +670,10 @@ export function search(options: SearchOptions): Promise<SearchResult[] | { resul
  * Get the file path for an item.
  */
 function _getItemPath(type: L2ItemType, id: string): string {
-  const subdir = type === 'entity' ? 'entities' : type === 'session' ? 'sessions' : 'learnings';
+  let subdir: string;
+  if (type === 'entity') subdir = 'entities';
+  else if (type === 'session') subdir = 'sessions';
+  else subdir = 'learnings';
   return path.join(L2_ROOT, subdir, `${id}.json`);
 }
 
@@ -948,7 +956,10 @@ export async function writeItem(
   }
 
   // Determine file path (still used for index entry)
-  const subdir = type === 'entity' ? 'entities' : type === 'session' ? 'sessions' : 'learnings';
+  let subdir: string;
+  if (type === 'entity') subdir = 'entities';
+  else if (type === 'session') subdir = 'sessions';
+  else subdir = 'learnings';
   const relativePath = `${subdir}/${id}.json`;
 
   // Encrypt: group items use group PSK, private items use proxy personal key
@@ -1130,7 +1141,10 @@ export async function shareItem(
 
   // Generate new ID for COW copy
   const copyId = generateId();
-  const subdir = original.type === 'entity' ? 'entities' : original.type === 'session' ? 'sessions' : 'learnings';
+  let subdir: string;
+  if (original.type === 'entity') subdir = 'entities';
+  else if (original.type === 'session') subdir = 'sessions';
+  else subdir = 'learnings';
   const relativePath = `${subdir}/${copyId}.json`;
 
   // Write COW copy
@@ -1249,38 +1263,44 @@ export async function prefetchItems(
  * Sweep legacy group culture TTL items.
  * Returns count of swept items.
  */
+function parseGroupTtl(culture: string): number | null {
+  try {
+    const parsed = JSON.parse(culture) as { ttl_default?: number | null };
+    return parsed.ttl_default && parsed.ttl_default > 0 ? parsed.ttl_default : null;
+  } catch {
+    return null;
+  }
+}
+
+async function isItemExpiredByTtl(
+  storage: ReturnType<typeof getStorageProvider>,
+  itemId: string,
+  ttlSeconds: number,
+): Promise<boolean> {
+  const stats = await storage.getAccessStats(itemId);
+  if (!stats) return false;
+
+  const refTime = stats.last_accessed_at;
+  if (!refTime) return false;
+
+  const lastAccess = new Date(refTime + 'Z').getTime();
+  const ageSec = (Date.now() - lastAccess) / 1000;
+  return ageSec > ttlSeconds;
+}
+
 async function sweepLegacyGroupTtl(storage: ReturnType<typeof getStorageProvider>): Promise<number> {
   let swept = 0;
   const groups = await storage.listGroups();
+
   for (const group of groups) {
-    let culture: { ttl_default?: number | null } = {};
-    try {
-      culture = JSON.parse(group.culture);
-    } catch {
-      continue;
-    }
+    const ttlSeconds = parseGroupTtl(group.culture);
+    if (ttlSeconds === null) continue;
 
-    if (!culture.ttl_default || culture.ttl_default <= 0) continue;
-
-    const ttlSeconds = culture.ttl_default;
     const items = await storage.listGroupItems(group.id, 10000);
-
     for (const item of items) {
-      const stats = await storage.getAccessStats(item.id);
-      if (!stats) continue;
-
-      const refTime = stats.last_accessed_at;
-      if (!refTime) {
-        if (stats.access_count === 0) continue;
-      }
-
-      if (refTime) {
-        const lastAccess = new Date(refTime + 'Z').getTime();
-        const ageSec = (Date.now() - lastAccess) / 1000;
-        if (ageSec > ttlSeconds) {
-          await deleteItem(item.id);
-          swept++;
-        }
+      if (await isItemExpiredByTtl(storage, item.id, ttlSeconds)) {
+        await deleteItem(item.id);
+        swept++;
       }
     }
   }
@@ -1602,6 +1622,34 @@ async function processFileForIndex(
   };
 }
 
+async function scanDirectoryForIndex(
+  dir: string,
+  type: L2ItemType,
+  cryptoProvider: ReturnType<typeof getDefaultCryptoProvider>,
+  shouldEncrypt: boolean,
+  storage: ReturnType<typeof getStorageProvider>,
+): Promise<Array<{ entry: L2IndexEntry; encrypted: boolean }>> {
+  const dirPath = path.join(L2_ROOT, dir);
+  const results: Array<{ entry: L2IndexEntry; encrypted: boolean }> = [];
+
+  try {
+    const files = await fs.readdir(dirPath);
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue;
+      try {
+        const result = await processFileForIndex(path.join(dirPath, file), file, type, dir, cryptoProvider, shouldEncrypt, storage);
+        if (result) results.push(result);
+      } catch {
+        // Skip invalid files
+      }
+    }
+  } catch {
+    // Directory doesn't exist, skip
+  }
+
+  return results;
+}
+
 /**
  * Rebuild the index by scanning all files.
  * Populates blob index, FTS5, and vec tables.
@@ -1620,27 +1668,10 @@ export async function rebuildIndex(options?: { reencrypt?: boolean }): Promise<{
   const storage = getStorageProvider();
 
   for (const { dir, type } of subdirs) {
-    const dirPath = path.join(L2_ROOT, dir);
-
-    try {
-      const files = await fs.readdir(dirPath);
-
-      for (const file of files) {
-        if (!file.endsWith('.json')) continue;
-
-        const filePath = path.join(dirPath, file);
-        try {
-          const result = await processFileForIndex(filePath, file, type, dir, cryptoProvider, shouldEncrypt ?? false, storage);
-          if (result) {
-            entries.push(result.entry);
-            if (result.encrypted) encryptedCount++;
-          }
-        } catch {
-          // Skip invalid files
-        }
-      }
-    } catch {
-      // Directory doesn't exist, skip
+    const dirEntries = await scanDirectoryForIndex(dir, type, cryptoProvider, shouldEncrypt ?? false, storage);
+    for (const e of dirEntries) {
+      entries.push(e.entry);
+      if (e.encrypted) encryptedCount++;
     }
   }
 
