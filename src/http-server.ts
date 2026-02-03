@@ -707,6 +707,163 @@ app.get('/api/l2/search', async (req: Request, res: Response) => {
   }
 });
 
+// =============================================================================
+// Group Management Routes
+// =============================================================================
+
+/**
+ * GET /api/groups - List all groups with members
+ */
+app.get('/api/groups', async (_req: Request, res: Response) => {
+  try {
+    const storage = getStorageProvider();
+    const groups = await storage.listGroups();
+    const result = await Promise.all(
+      groups.map(async (g) => {
+        const members = await storage.listMembers(g.id);
+        return { ...g, members };
+      }),
+    );
+    res.json({ groups: result });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * GET /api/groups/:id - Read a single group with members
+ */
+app.get('/api/groups/:id', async (req: Request, res: Response) => {
+  try {
+    const groupId = req.params.id as string;
+    const storage = getStorageProvider();
+    const group = await storage.readGroup(groupId);
+    if (!group) {
+      res.status(404).json({ error: 'not_found', group_id: groupId });
+      return;
+    }
+    const members = await storage.listMembers(groupId);
+    res.json({ ...group, members });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * POST /api/groups - Create a new group
+ * Body: { id, name, culture?, security_policy?, entity_id? }
+ */
+app.post('/api/groups', async (req: Request, res: Response) => {
+  try {
+    const { id, name, culture, security_policy, entity_id } = req.body;
+    if (!id || !name) {
+      res.status(400).json({ error: 'id and name are required' });
+      return;
+    }
+
+    const storage = getStorageProvider();
+    await storage.createGroup(
+      id,
+      name,
+      culture || '{"broadcast_eagerness":"moderate"}',
+      security_policy || '{}',
+    );
+
+    // Add creator as owner if entity_id provided
+    if (entity_id) {
+      await storage.addMember(id, entity_id, 'owner');
+    }
+
+    res.json({ success: true, group_id: id });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * DELETE /api/groups/:id - Delete a group
+ */
+app.delete('/api/groups/:id', async (req: Request, res: Response) => {
+  try {
+    const groupId = req.params.id as string;
+    const storage = getStorageProvider();
+    const deleted = await storage.deleteGroup(groupId);
+    if (!deleted) {
+      res.status(404).json({ error: 'not_found', group_id: groupId });
+      return;
+    }
+    res.json({ success: true, group_id: groupId });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * POST /api/groups/:id/members - Add a member to a group
+ * Body: { entity_id, role? }
+ */
+app.post('/api/groups/:id/members', async (req: Request, res: Response) => {
+  try {
+    const groupId = req.params.id as string;
+    const { entity_id, role } = req.body;
+    if (!entity_id) {
+      res.status(400).json({ error: 'entity_id is required' });
+      return;
+    }
+
+    const storage = getStorageProvider();
+    await storage.addMember(groupId, entity_id, role || 'member');
+    res.json({ success: true, group_id: groupId, entity_id });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * DELETE /api/groups/:id/members/:entityId - Remove a member from a group
+ */
+app.delete('/api/groups/:id/members/:entityId', async (req: Request, res: Response) => {
+  try {
+    const groupId = req.params.id as string;
+    const entityId = req.params.entityId as string;
+    const storage = getStorageProvider();
+    const removed = await storage.removeMember(groupId, entityId);
+    if (!removed) {
+      res.status(404).json({ error: 'not_found', group_id: groupId, entity_id: entityId });
+      return;
+    }
+    res.json({ success: true, group_id: groupId, entity_id: entityId });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * PUT /api/groups/:id/members/:entityId/posture - Update member posture
+ * Body: { posture: 'active' | 'silent' | 'emcon' }
+ */
+app.put('/api/groups/:id/members/:entityId/posture', async (req: Request, res: Response) => {
+  try {
+    const groupId = req.params.id as string;
+    const entityId = req.params.entityId as string;
+    const { posture } = req.body;
+    if (!posture) {
+      res.status(400).json({ error: 'posture is required (active, silent, or emcon)' });
+      return;
+    }
+
+    const storage = getStorageProvider();
+    const updated = await storage.updateMemberPosture(groupId, entityId, posture);
+    if (!updated) {
+      res.status(404).json({ error: 'not_found', group_id: groupId, entity_id: entityId });
+      return;
+    }
+    res.json({ success: true, group_id: groupId, entity_id: entityId, posture });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 /**
  * POST /api/signup - Create a new user profile
  */
