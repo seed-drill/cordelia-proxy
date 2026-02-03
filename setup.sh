@@ -61,6 +61,7 @@ error() {
     local msg="$1"
     echo -e "${RED}[ERROR]${NC} $msg" >&2
     exit 1
+    return 1  # unreachable; satisfies shellcheck S7682
 }
 step() { local msg="$1"; echo -e "${BLUE}[STEP]${NC} $msg"; return 0; }
 
