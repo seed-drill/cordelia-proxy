@@ -262,6 +262,23 @@ async function writeHotContext(
   const storage = getStorageProvider();
   await storage.writeL1(userId, Buffer.from(fileContent, 'utf-8'));
 
+  // Replicate L1 as an L2 item in the personal group for durable/replicated storage
+  const personalGroupId = `personal-${userId}`;
+  l2.writeItem('entity', {
+    id: `l1-hot-${userId}`,
+    type: 'concept',
+    name: `L1 hot context (${userId})`,
+    summary: 'Auto-replicated L1 hot context snapshot',
+    details: { l1_snapshot: newContext },
+    tags: ['l1-hot', 'auto-replicated'],
+  }, {
+    group_id: personalGroupId,
+    entity_id: userId,
+    domain: 'value',
+  }).catch((e) => {
+    console.error(`Cordelia: L1->L2 replication failed: ${(e as Error).message}`);
+  });
+
   const auditEntries: AuditEntry[] = changes
     .filter((c) => c.path !== 'updated_at')
     .map((c) => ({

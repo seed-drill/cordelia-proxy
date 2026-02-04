@@ -830,7 +830,9 @@ export interface WriteItemOptions {
 }
 
 /**
- * Encrypt item content using group PSK, personal key, or plaintext.
+ * Encrypt item content using group PSK.
+ * All items belong to a group (personal or shared) and use the group PSK.
+ * Falls back to plaintext only if no group context or no PSK available.
  */
 async function encryptItemContent(validated: L2Item, groupId?: string): Promise<string> {
   if (groupId) {
@@ -842,14 +844,6 @@ async function encryptItemContent(validated: L2Item, groupId?: string): Promise<
       return JSON.stringify(encrypted, null, 2);
     }
     console.error(`Cordelia: no PSK for group ${groupId}, storing unencrypted`);
-    return JSON.stringify(validated, null, 2);
-  }
-
-  const cryptoProvider = getDefaultCryptoProvider();
-  if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
-    const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
-    const encrypted = await cryptoProvider.encrypt(plaintext);
-    return JSON.stringify(encrypted, null, 2);
   }
 
   return JSON.stringify(validated, null, 2);
@@ -960,6 +954,9 @@ export async function writeItem(
     return { error: `validation_failed: ${(e as Error).message}` };
   }
 
+  // Default to personal group when no group_id specified
+  const effectiveGroupId = options.group_id || (options.entity_id ? `personal-${options.entity_id}` : undefined);
+
   // Determine file path (still used for index entry)
   let subdir: string;
   if (type === 'entity') subdir = 'entities';
@@ -967,8 +964,8 @@ export async function writeItem(
   else subdir = 'learnings';
   const relativePath = `${subdir}/${id}.json`;
 
-  // Encrypt: group items use group PSK, private items use proxy personal key
-  const fileContent = await encryptItemContent(validated, options.group_id);
+  // Encrypt: all items use group PSK (personal or shared group)
+  const fileContent = await encryptItemContent(validated, effectiveGroupId);
 
   // Determine domain (metadata -- always set regardless of visibility)
   const domain: MemoryDomain = options.domain || inferDomainFromType(type, subtype);
@@ -976,36 +973,37 @@ export async function writeItem(
   // Lifecycle policy: group culture governs group items, domain governs private items.
   // Groups are sovereign over their own information handling policies.
   let ttlExpires: string | undefined;
-  if (options.group_id) {
-    // Group item: culture policy is the sole TTL source
-    const culture = await getGroupCulture(options.group_id);
+  if (effectiveGroupId) {
+    // Group item (personal or shared): culture policy is the sole TTL source
+    const culture = await getGroupCulture(effectiveGroupId);
     if (culture?.ttl_default && culture.ttl_default > 0) {
       ttlExpires = new Date(Date.now() + culture.ttl_default * 1000).toISOString();
     }
   } else if (domain === 'interrupt') {
-    // Private item: domain governs lifecycle
+    // No group context: domain governs lifecycle
     ttlExpires = computeInterruptTtl();
   }
 
-  // Write via storage provider
+  // Write via storage provider -- all items are group-scoped (personal or shared)
   const storage = getStorageProvider();
   const meta: import('./storage.js').L2ItemMeta = {
     type: type as 'entity' | 'session' | 'learning',
     owner_id: options.entity_id,
-    visibility: options.group_id ? 'group' : 'private',
-    group_id: options.group_id,
+    visibility: effectiveGroupId ? 'group' : 'private',
+    group_id: effectiveGroupId,
     author_id: options.entity_id,
-    key_version: options.group_id ? 2 : 1,
+    key_version: effectiveGroupId ? 2 : 1,
     domain,
     ttl_expires_at: ttlExpires,
   };
   await storage.writeL2Item(id, type, Buffer.from(fileContent, 'utf-8'), meta);
 
   // Update blob index, FTS5, and vec tables
-  await updateItemIndex(id, type, validated, relativePath, options, domain, subtype);
+  const effectiveOptions = { ...options, group_id: effectiveGroupId };
+  await updateItemIndex(id, type, validated, relativePath, effectiveOptions, domain, subtype);
 
-  // Push group items to Rust node for P2P replication
-  if (options.group_id) {
+  // Push to Rust node for P2P replication (personal and shared groups)
+  if (effectiveGroupId) {
     const { getNodeBridge } = await import('./node-bridge.js');
     const bridge = getNodeBridge();
     const encryptedData = JSON.parse(fileContent);

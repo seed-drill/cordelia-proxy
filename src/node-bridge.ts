@@ -207,10 +207,6 @@ export class NodeBridge {
       return { data: decrypted, skip: false };
     }
 
-    if (isEncryptedPayload(data) && keyVersion === 1) {
-      return { data: Buffer.alloc(0), skip: true };
-    }
-
     return { data: Buffer.from(JSON.stringify(data), 'utf-8'), skip: false };
   }
 
