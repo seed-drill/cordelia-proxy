@@ -925,11 +925,15 @@ app.put('/api/groups/:id/members/:entityId/posture', async (req: Request, res: R
  * POST /api/signup - Create a new user profile
  */
 // Use Rutherford library for signup endpoint
-app.post('/api/signup', createSignupHandler({
-  storage: getStorageProvider(),
-  crypto: getDefaultCryptoProvider(),
-  sessions,
-}));
+app.post('/api/signup', (req: Request, res: Response) => {
+  // Get providers at request time (after initialization)
+  const handler = createSignupHandler({
+    storage: getStorageProvider(),
+    crypto: getDefaultCryptoProvider(),
+    sessions,
+  });
+  return handler(req, res);
+});
 
 // =============================================================================
 // Profile Management Routes
