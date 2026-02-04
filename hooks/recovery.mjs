@@ -14,7 +14,9 @@ import { execSync } from 'child_process';
  */
 export function notify(title, message) {
   try {
-    execSync(`osascript -e 'display notification "${message}" with title "${title}"'`);
+    const safeTitle = title.replace(/[\\"]/g, '');
+    const safeMessage = message.replace(/[\\"]/g, '');
+    execSync(`osascript -e 'display notification "${safeMessage}" with title "${safeTitle}"'`);
   } catch {
     // Ignore notification failures
   }

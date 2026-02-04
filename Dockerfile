@@ -16,6 +16,10 @@ COPY dashboard/ ./dashboard/
 # Install dev deps for build, then build, then prune
 RUN npm install && npm run build && npm prune --production
 
+# Run as non-root
+RUN addgroup -g 1001 -S nodejs && adduser -S cordelia -u 1001
+USER cordelia
+
 # Expose port
 EXPOSE 3847
 
