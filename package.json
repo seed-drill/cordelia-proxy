@@ -51,6 +51,7 @@
     "@opentelemetry/sdk-node": "^0.211.0",
     "@opentelemetry/semantic-conventions": "^1.39.0",
     "@sentry/node": "^10.38.0",
+    "@seed-drill/rutherford": "file:../rutherford",
     "better-sqlite3": "^12.6.2",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",

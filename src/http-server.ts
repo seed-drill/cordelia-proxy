@@ -28,6 +28,7 @@ import * as crypto from 'crypto';
 import * as path from 'path';
 import { L1HotContextSchema, type L1HotContext } from './schema.js';
 import * as l2 from './l2.js';
+import { createSignupHandler, getGenesisHTML } from '@seed-drill/rutherford';
 import {
   getConfig as getCryptoConfig,
   loadOrCreateSalt,
@@ -923,146 +924,12 @@ app.put('/api/groups/:id/members/:entityId/posture', async (req: Request, res: R
 /**
  * POST /api/signup - Create a new user profile
  */
-app.post('/api/signup', async (req: Request, res: Response) => {
-  try {
-    const {
-      name,
-      github_id,
-      username,  // Alternative to github_id for local auth
-      roles = [],
-      org_name,
-      org_role,
-      style = [],
-      key_refs: rawKeyRefs = [],
-      heroes = [],
-      planning_mode = 'important',
-      verbosity = 'concise',
-      emoji: rawEmoji = false,
-    } = req.body;
-
-    // Convert emoji to boolean (might come as string from form)
-    const emoji = rawEmoji === true || rawEmoji === 'true';
-
-    // Transform key_refs to required format (author:title with lowercase/underscores)
-    const key_refs = rawKeyRefs.map((ref: string) => {
-      // If already in correct format, use as-is
-      if (/^[a-z_]+:[a-z0-9_]+$/.test(ref)) return ref;
-      // Otherwise, try to normalize it
-      return ref.toLowerCase().replace(/[^a-z0-9:]/g, '_').replace(/_+/g, '_').replace(/(^_)|(_$)/g, '');
-    }).filter((ref: string) => /^[a-z_]+:[a-z0-9_]+$/.test(ref));
-
-    // Accept either github_id or username for user identification
-    const userIdentifier = github_id || username;
-    if (!name || !userIdentifier) {
-      res.status(400).json({ error: 'Name and username (or GitHub ID) are required' });
-      return;
-    }
-
-    // Generate user ID from identifier
-    const userId = userIdentifier.toLowerCase().replace(/[^a-z0-9]/g, '_');
-
-    // Check if user already exists
-    const storage = getStorageProvider();
-    const existing = await storage.readL1(userId);
-    if (existing) {
-      res.status(409).json({ error: 'User already exists' });
-      return;
-    }
-
-    // Build the L1 hot context
-    const now = new Date().toISOString();
-    const orgs = org_name && org_name.toLowerCase() !== 'independent'
-      ? [{ id: org_name.toLowerCase().replace(/\s+/g, '_'), name: org_name, role: org_role || 'member' }]
-      : [];
-
-    // Build notes from heroes if provided
-    const notes: string[] = [];
-    if (heroes.length > 0) {
-      notes.push(`Heroes: ${heroes.join(', ')}`);
-    }
-
-    const newContext = {
-      version: 1,
-      updated_at: now,
-      identity: {
-        id: userId,
-        name,
-        roles,
-        orgs,
-        key_refs,
-        style,
-        github_id: github_id || userIdentifier,  // Use github_id if provided, otherwise username
-        tz: 'UTC',
-      },
-      active: {
-        project: null,
-        sprint: null,
-        focus: null,
-        blockers: [],
-        next: [],
-        context_refs: [],
-        notes,
-      },
-      prefs: {
-        planning_mode,
-        feedback_style: 'continuous',
-        verbosity,
-        emoji,
-        proactive_suggestions: true,
-        auto_commit: false,
-      },
-      delegation: {
-        allowed: true,
-        max_parallel: 3,
-        require_approval: ['git_push', 'destructive_operations', 'external_api_calls', 'file_delete'],
-        autonomous: ['file_read', 'file_write', 'git_commit', 'code_execution_sandbox'],
-      },
-      ephemeral: {
-        session_count: 1,
-        current_session_start: now,
-        last_session_end: null,
-        last_summary: null,
-        open_threads: [],
-        vessel: null,
-        integrity: {
-          chain_hash: crypto.createHash('sha256').update(`genesis:${now}:${userId}`).digest('hex'),
-          previous_hash: '0000000000000000000000000000000000000000000000000000000000000000',
-          genesis: now,
-        },
-      },
-    };
-
-    // Validate against schema
-    const validated = L1HotContextSchema.parse(newContext);
-
-    // Write to file (encrypt if crypto is enabled)
-    const cryptoProvider = getDefaultCryptoProvider();
-    let fileContent: string;
-
-    if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
-      const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
-      const encrypted = await cryptoProvider.encrypt(plaintext);
-      fileContent = JSON.stringify(encrypted, null, 2);
-    } else {
-      fileContent = JSON.stringify(validated, null, 2);
-    }
-
-    await storage.writeL1(userId, Buffer.from(fileContent, 'utf-8'));
-
-    // Update the session to link this user to their new Cordelia profile
-    const sessionId = req.signedCookies?.cordelia_session;
-    if (sessionId && sessions.has(sessionId)) {
-      const session = sessions.get(sessionId)!;
-      session.cordelia_user = userId;
-      sessions.set(sessionId, session);
-    }
-
-    res.json({ success: true, user_id: userId });
-  } catch (error) {
-    console.error('Signup error:', error);
-    res.status(500).json({ error: (error as Error).message });
-  }
-});
+// Use Rutherford library for signup endpoint
+app.post('/api/signup', createSignupHandler({
+  storage: getStorageProvider(),
+  crypto: getDefaultCryptoProvider(),
+  sessions,
+}));
 
 // =============================================================================
 // Profile Management Routes
@@ -1659,6 +1526,12 @@ if (PORTAL_URL) {
     res.redirect(PORTAL_URL);
   });
 }
+
+// Serve genesis.html from Rutherford library
+app.get('/genesis.html', (_req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send(getGenesisHTML());
+});
 
 // Serve dashboard static files (after API routes, fallback when no PORTAL_URL)
 app.use(express.static(DASHBOARD_ROOT));
