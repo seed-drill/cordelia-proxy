@@ -21,6 +21,7 @@ const delegationContent = document.getElementById('delegation-content');
 const refsContent = document.getElementById('refs-content');
 const ephemeralContent = document.getElementById('ephemeral-content');
 const l2Content = document.getElementById('l2-content');
+const networkContent = document.getElementById('network-content');
 
 // Auth state
 let currentAuth = null;
@@ -565,6 +566,106 @@ function renderL2Summary(l2Index) {
 }
 
 /**
+ * Format seconds as "Xd Xh Xm"
+ */
+function formatUptime(secs) {
+  if (!secs && secs !== 0) return 'N/A';
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const parts = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0 || d > 0) parts.push(`${h}h`);
+  parts.push(`${m}m`);
+  return parts.join(' ');
+}
+
+/**
+ * Render Network Health panel content
+ */
+function renderNetworkHealth(status, diagnostics) {
+  if (!status || !status.connected) {
+    const errorMsg = status?.error || 'Core node not reachable';
+    networkContent.innerHTML = `
+      <div class="network-grid">
+        <div class="network-stat" style="grid-column: 1 / -1;">
+          <div class="status-indicator">
+            <span class="status-dot offline"></span>
+            <span>Node not connected</span>
+          </div>
+          <div class="network-stat-value" style="margin-top: 0.5rem; font-size: 0.85rem; color: var(--color-muted);">${escapeHtml(errorMsg)}</div>
+        </div>
+      </div>
+      <div class="network-footer">Last checked: ${new Date().toLocaleTimeString('en-GB')}</div>
+    `;
+    return;
+  }
+
+  const nodeId = status.node_id || 'N/A';
+  const shortNodeId = nodeId.length > 16 ? nodeId.substring(0, 8) + '...' + nodeId.substring(nodeId.length - 8) : nodeId;
+  const entityId = status.entity_id || 'N/A';
+  const peers = status.peers || {};
+  const groups = status.groups || [];
+
+  // Diagnostics may not be available
+  const repl = diagnostics?.replication || {};
+  const storage = diagnostics?.storage || {};
+
+  networkContent.innerHTML = `
+    <div class="network-grid">
+      <div class="network-stat">
+        <h3>Node Status</h3>
+        <div class="status-indicator">
+          <span class="status-dot online"></span>
+          <span>Connected</span>
+        </div>
+        <div class="network-stat-row"><span class="label">Node ID:</span> <span class="value hash" title="${escapeHtml(nodeId)}">${escapeHtml(shortNodeId)}</span></div>
+        <div class="network-stat-row"><span class="label">Entity:</span> <span class="value">${escapeHtml(entityId)}</span></div>
+        <div class="network-stat-row"><span class="label">Uptime:</span> <span class="value">${formatUptime(status.uptime_secs)}</span></div>
+      </div>
+      <div class="network-stat">
+        <h3>Peers</h3>
+        <div class="network-stat-row"><span class="label">Warm:</span> <span class="value">${peers.warm ?? 0}</span></div>
+        <div class="network-stat-row"><span class="label">Hot:</span> <span class="value">${peers.hot ?? 0}</span></div>
+        <div class="network-stat-row"><span class="label">Total:</span> <span class="value">${peers.total ?? 0}</span></div>
+      </div>
+      <div class="network-stat">
+        <h3>Replication</h3>
+        <div class="network-stat-row"><span class="label">Pushed:</span> <span class="value">${repl.items_pushed ?? '-'}</span></div>
+        <div class="network-stat-row"><span class="label">Synced:</span> <span class="value">${repl.items_synced ?? '-'}</span></div>
+        <div class="network-stat-row"><span class="label">Errors:</span> <span class="value">${repl.sync_errors ?? '-'}</span></div>
+        <div class="network-stat-row"><span class="label">Sync rounds:</span> <span class="value">${repl.sync_rounds ?? '-'}</span></div>
+      </div>
+      <div class="network-stat">
+        <h3>Storage</h3>
+        <div class="network-stat-row"><span class="label">Items:</span> <span class="value">${storage.l2_items ?? '-'}</span></div>
+        <div class="network-stat-row"><span class="label">Size:</span> <span class="value">${storage.l2_data_bytes ? (storage.l2_data_bytes / (1024 * 1024)).toFixed(1) + ' MB' : '-'}</span></div>
+        <div class="network-stat-row"><span class="label">Groups:</span> <span class="value">${groups.length}</span></div>
+      </div>
+    </div>
+    <div class="network-footer">Last checked: ${new Date().toLocaleTimeString('en-GB')}</div>
+  `;
+}
+
+/**
+ * Load network health data from core node APIs
+ */
+async function loadNetworkHealth() {
+  try {
+    const [statusRes, diagRes] = await Promise.all([
+      fetch(`${API_BASE}/api/core/status`),
+      fetch(`${API_BASE}/api/core/diagnostics`),
+    ]);
+    const status = await statusRes.json();
+    const diagnostics = diagRes.ok ? await diagRes.json() : null;
+    renderNetworkHealth(status, diagnostics);
+  } catch (error) {
+    console.error('Network health fetch error:', error);
+    renderNetworkHealth(null, null);
+  }
+}
+
+/**
  * Load and display data for a user
  */
 async function loadUserData(userId) {
@@ -674,6 +775,9 @@ async function init() {
     showDashboardContainer();
     // Load users and data
     loadUsers();
+    // Start network health polling
+    loadNetworkHealth();
+    setInterval(loadNetworkHealth, 30000);
   } else {
     // Show landing page for unauthenticated users
     showLanding();

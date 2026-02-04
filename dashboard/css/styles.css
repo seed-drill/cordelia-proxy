@@ -455,6 +455,65 @@ main {
   white-space: nowrap;
 }
 
+/* Network Health Card */
+.network-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1.5rem;
+}
+
+.network-stat h3 {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+}
+
+.network-stat-row {
+  font-size: 0.9rem;
+  margin-bottom: 0.3rem;
+}
+
+.network-stat-row .label {
+  color: var(--color-muted);
+}
+
+.network-stat-row .value {
+  font-weight: 600;
+  font-family: 'Courier New', monospace;
+}
+
+.status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-dot.online {
+  background-color: #10b981;
+}
+
+.status-dot.offline {
+  background-color: #dc3545;
+}
+
+.network-footer {
+  text-align: right;
+  font-size: 0.75rem;
+  color: var(--color-muted);
+  margin-top: 0.75rem;
+}
+
 /* Footer */
 footer {
   text-align: center;
@@ -492,5 +551,9 @@ footer p {
 
   .pref-grid {
     grid-template-columns: 1fr;
+  }
+
+  .network-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
 }

@@ -481,6 +481,15 @@
     <div id="error" class="error" style="display: none;"></div>
 
     <div id="dashboard" style="display: none;">
+      <!-- Row 0: Network Health -->
+      <div class="row">
+        <section class="card network-card full-width">
+          <h2>Network Health</h2>
+          <p class="card-description">P2P node status, peer connections, and replication metrics. Auto-refreshes every 30 seconds.</p>
+          <div id="network-content"></div>
+        </section>
+      </div>
+
       <!-- Row 1: Identity + Active State -->
       <div class="row">
         <section class="card identity-card">
@@ -594,6 +603,6 @@
     <p id="status-line"></p>
   </footer>
 
-  <script src="js/app.js?v=6"></script>
+  <script src="js/app.js?v=7"></script>
 </body>
 </html>

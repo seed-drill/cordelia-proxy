@@ -516,6 +516,52 @@ app.get('/api/core/status', async (_req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/core/diagnostics - Core node diagnostics (proxied from core node)
+ * Returns replication stats, storage stats, and peer details.
+ */
+app.get('/api/core/diagnostics', async (_req: Request, res: Response) => {
+  if (!CORDELIA_CORE_API) {
+    res.json({ connected: false, error: 'Core API not configured', core_api: null });
+    return;
+  }
+
+  try {
+    const fs = await import('fs/promises');
+    let bearerToken = process.env.CORDELIA_NODE_TOKEN || '';
+    if (!bearerToken) {
+      try {
+        bearerToken = (await fs.readFile('/home/cordelia/.cordelia/node-token', 'utf-8')).trim();
+      } catch {
+        // Token file may not exist yet
+      }
+    }
+
+    const response = await fetch(`${CORDELIA_CORE_API}/api/v1/diagnostics`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Core API returned ${response.status}`);
+    }
+
+    const data = await response.json();
+    res.json({ connected: true, core_api: CORDELIA_CORE_API, ...data });
+  } catch (error) {
+    const err = error as Error & { cause?: Error };
+    console.error('Core diagnostics API error:', err.message, err.cause?.message || '');
+    res.json({
+      connected: false,
+      error: err.cause?.message || err.message,
+      core_api: CORDELIA_CORE_API,
+    });
+  }
+});
+
+/**
  * GET /api/peers - P2P network peer status (proxied from core node)
  * @deprecated Use /api/core/status instead
  */
