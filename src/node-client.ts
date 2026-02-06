@@ -24,6 +24,10 @@ export interface L2ReadResponse {
     author_id: string | null;
     key_version: number;
     checksum: string | null;
+    parent_id?: string | null;
+    is_copy?: boolean;
+    domain?: string | null;
+    ttl_expires_at?: string | null;
   };
 }
 
@@ -35,6 +39,8 @@ export interface L2WriteMeta {
   key_version?: number;
   parent_id?: string | null;
   is_copy?: boolean;
+  domain?: string | null;
+  ttl_expires_at?: string | null;
 }
 
 export interface GroupInfo {
@@ -111,6 +117,21 @@ export class NodeClient {
 
   async writeL1(userId: string, data: unknown): Promise<void> {
     await this.post('/api/v1/l1/write', { user_id: userId, data });
+  }
+
+  async deleteL1(userId: string): Promise<boolean> {
+    try {
+      await this.post('/api/v1/l1/delete', { user_id: userId });
+      return true;
+    } catch (e: unknown) {
+      if (e instanceof NodeClientError && e.status === 404) return false;
+      throw e;
+    }
+  }
+
+  async listL1Users(): Promise<string[]> {
+    const res = await this.post('/api/v1/l1/list', {}) as { users: string[] };
+    return res.users ?? [];
   }
 
   // ====================================================================

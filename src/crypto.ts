@@ -17,6 +17,8 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as os from 'os';
+import { execSync } from 'node:child_process';
 
 // Key derivation parameters
 const KEY_LENGTH = 32; // 256 bits for AES-256
@@ -207,6 +209,46 @@ export function isEncryptedPayload(obj: unknown): obj is EncryptedPayload {
   }
   const p = obj as Record<string, unknown>;
   return p._encrypted === true && p.version === 1 && typeof p.iv === 'string' && typeof p.authTag === 'string' && typeof p.ciphertext === 'string';
+}
+
+/**
+ * Resolve encryption key using 3-tier priority chain:
+ *   1. Env var       -- CORDELIA_ENCRYPTION_KEY
+ *   2. Keychain      -- macOS Keychain / Linux secret-tool (GNOME Keyring)
+ *   3. File          -- ~/.cordelia/key (0600 permissions)
+ *
+ * Returns key string or null. Never throws.
+ */
+export async function resolveEncryptionKey(): Promise<string | null> {
+  // 1. Environment variable
+  if (process.env.CORDELIA_ENCRYPTION_KEY) {
+    return process.env.CORDELIA_ENCRYPTION_KEY;
+  }
+
+  // 2. Platform keychain
+  const keychainCmds: Record<string, string> = {
+    darwin: 'security find-generic-password -a cordelia -s cordelia-encryption-key -w',
+    linux: 'secret-tool lookup service cordelia type encryption-key',
+  };
+  const cmd = keychainCmds[os.platform()];
+  if (cmd) {
+    try {
+      const key = execSync(cmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      if (key) return key;
+    } catch {
+      // Keychain entry not found -- fall through
+    }
+  }
+
+  // 3. File at ~/.cordelia/key
+  try {
+    const key = (await fs.readFile(path.join(os.homedir(), '.cordelia', 'key'), 'utf-8')).trim();
+    if (key) return key;
+  } catch {
+    // File not found -- fall through
+  }
+
+  return null;
 }
 
 // Singleton instance

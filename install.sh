@@ -376,7 +376,7 @@ fi
 echo "Seeding L1 memory for $USER_ID..."
 export CORDELIA_ENCRYPTION_KEY="$ENCRYPTION_KEY"
 export CORDELIA_MEMORY_ROOT="$MEMORY_ROOT"
-export CORDELIA_STORAGE=sqlite
+export CORDELIA_STORAGE=node
 [[ "$NO_EMBEDDINGS" = true ]] && export CORDELIA_EMBEDDING_PROVIDER=none
 node "$PROXY_DIR/scripts/seed-l1.mjs" "$USER_ID"
 info "L1 context seeded"

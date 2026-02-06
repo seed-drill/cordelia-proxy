@@ -33,6 +33,7 @@ import {
   getConfig as getCryptoConfig,
   loadOrCreateSalt,
   initCrypto,
+  resolveEncryptionKey,
   getDefaultCryptoProvider,
   isEncryptedPayload,
   type EncryptedPayload,
@@ -1552,11 +1553,11 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 // =============================================================================
 
 async function initEncryption(): Promise<void> {
-  const passphrase = process.env.CORDELIA_ENCRYPTION_KEY;
+  const passphrase = await resolveEncryptionKey();
   const config = getCryptoConfig(MEMORY_ROOT);
 
-  if (!config.enabled || !passphrase) {
-    console.log('Cordelia HTTP: Encryption disabled (no CORDELIA_ENCRYPTION_KEY)');
+  if (!passphrase) {
+    console.log('Cordelia HTTP: Encryption disabled (no key found via env/keychain/file)');
     return;
   }
 

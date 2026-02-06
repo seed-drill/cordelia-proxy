@@ -103,12 +103,24 @@ export class NodeStorageProvider implements StorageProvider {
   }
 
   async deleteL1(userId: string): Promise<boolean> {
-    // No delete endpoint on node yet -- use local
+    if (await this.useNode()) {
+      try {
+        return await this.client.deleteL1(userId);
+      } catch {
+        this._nodeAvailable = false;
+      }
+    }
     return this.local.deleteL1(userId);
   }
 
   async listL1Users(): Promise<string[]> {
-    // No list endpoint on node yet -- use local
+    if (await this.useNode()) {
+      try {
+        return await this.client.listL1Users();
+      } catch {
+        this._nodeAvailable = false;
+      }
+    }
     return this.local.listL1Users();
   }
 
@@ -145,6 +157,8 @@ export class NodeStorageProvider implements StorageProvider {
           key_version: meta.key_version,
           parent_id: meta.parent_id,
           is_copy: meta.is_copy,
+          domain: meta.domain,
+          ttl_expires_at: meta.ttl_expires_at,
         });
         return;
       } catch (e) {
@@ -205,15 +219,8 @@ export class NodeStorageProvider implements StorageProvider {
   }
 
   async ftsSearch(query: string, limit: number): Promise<Array<{ item_id: string; rank: number }>> {
-    if (await this.useNode()) {
-      try {
-        const ids = await this.client.ftsSearch(query, limit);
-        // Node returns just IDs, we assign synthetic ranks
-        return ids.map((id, i) => ({ item_id: id, rank: -(i + 1) }));
-      } catch {
-        this._nodeAvailable = false;
-      }
-    }
+    // Always use local FTS -- local hybrid search (FTS5 BM25 + sqlite-vec) is
+    // superior to node-side FTS which lacks vec and returns synthetic ranks.
     return this.local.ftsSearch(query, limit);
   }
 
@@ -406,10 +413,10 @@ export class NodeStorageProvider implements StorageProvider {
           group_id: res.meta.group_id,
           author_id: res.meta.author_id,
           key_version: res.meta.key_version,
-          parent_id: null, // Not in current API response
-          is_copy: 0,
-          domain: null,
-          ttl_expires_at: null,
+          parent_id: res.meta.parent_id ?? null,
+          is_copy: res.meta.is_copy ? 1 : 0,
+          domain: res.meta.domain ?? null,
+          ttl_expires_at: res.meta.ttl_expires_at ?? null,
         };
       } catch (e) {
         if (e instanceof NodeClientError && e.status === 404) return null;

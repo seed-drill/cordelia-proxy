@@ -1003,7 +1003,8 @@ export async function writeItem(
   await updateItemIndex(id, type, validated, relativePath, effectiveOptions, domain, subtype);
 
   // Push to Rust node for P2P replication (personal and shared groups)
-  if (effectiveGroupId) {
+  // Skip when storage is 'node' -- the write already went to the node via storage provider
+  if (effectiveGroupId && storage.name !== 'node') {
     const { getNodeBridge } = await import('./node-bridge.js');
     const bridge = getNodeBridge();
     const encryptedData = JSON.parse(fileContent);
@@ -1185,7 +1186,8 @@ export async function shareItem(
   }
 
   // Push COW copy to Rust node for P2P replication
-  if (cowKeyVersion === 2) {
+  // Skip when storage is 'node' -- the write already went to the node via storage provider
+  if (cowKeyVersion === 2 && storage.name !== 'node') {
     const { getNodeBridge } = await import('./node-bridge.js');
     const bridge = getNodeBridge();
     const encryptedData = JSON.parse(cowFileContent.toString('utf-8'));

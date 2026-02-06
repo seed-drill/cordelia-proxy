@@ -14,6 +14,7 @@ import {
   getConfig as getCryptoConfig,
   loadOrCreateSalt,
   initCrypto,
+  resolveEncryptionKey,
 } from './crypto.js';
 import { initStorageProvider } from './storage.js';
 import type { SqliteStorageProvider } from './storage-sqlite.js';
@@ -40,11 +41,11 @@ const server = new Server(
 registerCordeliaTools(server);
 
 async function initEncryption(): Promise<void> {
-  const passphrase = process.env.CORDELIA_ENCRYPTION_KEY;
+  const passphrase = await resolveEncryptionKey();
   const config = getCryptoConfig(MEMORY_ROOT);
 
-  if (!config.enabled || !passphrase) {
-    console.error('Cordelia: Encryption disabled (no CORDELIA_ENCRYPTION_KEY)');
+  if (!passphrase) {
+    console.error('Cordelia: Encryption disabled (no key found via env/keychain/file)');
     return;
   }
 
@@ -136,20 +137,37 @@ async function main(): Promise<void> {
   }
 
   // Sync group items from P2P network (non-blocking on failure)
-  try {
-    const { getNodeBridge } = await import('./node-bridge.js');
-    const bridge = getNodeBridge();
-    if (await bridge.isAvailable()) {
-      await bridge.syncGroups(storageProvider);
-      const allGroups = await storageProvider.listGroups();
-      const groupIds = allGroups.map((g) => g.id);
-      const result = await bridge.syncGroupItems(groupIds, storageProvider);
-      if (result.synced > 0) {
-        console.error(`Cordelia: synced ${result.synced} group items from P2P network`);
+  // Skip node-bridge sync when CORDELIA_STORAGE=node (storage already talks to node directly)
+  if (storageProvider.name !== 'node') {
+    try {
+      const { getNodeBridge } = await import('./node-bridge.js');
+      const bridge = getNodeBridge();
+      if (await bridge.isAvailable()) {
+        await bridge.syncGroups(storageProvider);
+        const allGroups = await storageProvider.listGroups();
+        const groupIds = allGroups.map((g) => g.id);
+        const result = await bridge.syncGroupItems(groupIds, storageProvider);
+        if (result.synced > 0) {
+          console.error(`Cordelia: synced ${result.synced} group items from P2P network`);
+        }
       }
+    } catch (e) {
+      console.error(`Cordelia: node bridge sync failed (non-fatal): ${(e as Error).message}`);
     }
-  } catch (e) {
-    console.error(`Cordelia: node bridge sync failed (non-fatal): ${(e as Error).message}`);
+  } else {
+    console.error('Cordelia: CORDELIA_STORAGE=node -- skipping node-bridge sync (direct node storage)');
+  }
+
+  // For node storage: backfill local FTS/vec indexes from node data
+  if (storageProvider.name === 'node') {
+    try {
+      const backfillResult = await l2.backfillVec();
+      if (backfillResult.fts_updated > 0) {
+        console.error(`Cordelia: node mode backfill — fts_updated=${backfillResult.fts_updated}, vec_generated=${backfillResult.generated}, errors=${backfillResult.errors}`);
+      }
+    } catch (e) {
+      console.error(`Cordelia: node mode backfill failed (non-fatal): ${(e as Error).message}`);
+    }
   }
 
   // Initialize policy engine

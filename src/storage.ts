@@ -143,6 +143,54 @@ export function setStorageProvider(provider: StorageProvider): void {
  * Initialize the storage provider based on CORDELIA_STORAGE env var.
  * Returns the initialized provider.
  */
+/**
+ * Resolve node URL and token from config.toml and file fallbacks.
+ */
+async function resolveNodeConfig(): Promise<{ url: string; token: string }> {
+  let url = process.env.CORDELIA_NODE_URL || '';
+  let token = process.env.CORDELIA_NODE_TOKEN || '';
+
+  if (!url || !token) {
+    try {
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const os = await import('os');
+
+      // Read config.toml for node URL
+      if (!url) {
+        try {
+          const configPath = path.join(os.homedir(), '.cordelia', 'config.toml');
+          const content = await fs.readFile(configPath, 'utf-8');
+          // Simple TOML extraction for [node].api_addr
+          const nodeMatch = content.match(/\[node\][\s\S]*?api_addr\s*=\s*"?([^"\n]+)"?/);
+          if (nodeMatch) {
+            const addr = nodeMatch[1].trim();
+            const transport = content.match(/\[node\][\s\S]*?api_transport\s*=\s*"?([^"\n]+)"?/);
+            const proto = transport?.[1]?.trim() === 'https' ? 'https' : 'http';
+            url = `${proto}://${addr}`;
+          }
+        } catch {
+          // config.toml not found -- use default
+        }
+      }
+
+      // Read token from file
+      if (!token) {
+        try {
+          const tokenPath = path.join(os.homedir(), '.cordelia', 'node-token');
+          token = (await fs.readFile(tokenPath, 'utf-8')).trim();
+        } catch {
+          // token file not found
+        }
+      }
+    } catch {
+      // fs/path/os import failed -- shouldn't happen
+    }
+  }
+
+  return { url: url || 'http://127.0.0.1:9473', token };
+}
+
 export async function initStorageProvider(memoryRoot: string): Promise<StorageProvider> {
   const storageType = process.env.CORDELIA_STORAGE || 'sqlite';
 
@@ -150,8 +198,7 @@ export async function initStorageProvider(memoryRoot: string): Promise<StoragePr
 
   if (storageType === 'node') {
     const { NodeStorageProvider } = await import('./storage-node.js');
-    const nodeUrl = process.env.CORDELIA_NODE_URL || 'http://127.0.0.1:9473';
-    const nodeToken = process.env.CORDELIA_NODE_TOKEN || '';
+    const { url: nodeUrl, token: nodeToken } = await resolveNodeConfig();
     provider = new NodeStorageProvider(nodeUrl, nodeToken, memoryRoot);
   } else if (storageType === 'sqlite') {
     const { SqliteStorageProvider } = await import('./storage-sqlite.js');
