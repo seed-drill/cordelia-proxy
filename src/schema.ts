@@ -219,7 +219,7 @@ export const L2IndexEntrySchema = z.object({
   keywords: z.array(z.string()).default([]),
   path: z.string().describe('Relative file path from L2-warm/'),
   embedding: z.array(z.number()).optional().describe('Semantic embedding vector'),
-  visibility: z.enum(['private', 'group', 'public', 'shared']).default('private').describe('Access visibility for multi-user support'),
+  visibility: z.enum(['private', 'group', 'public']).default('private').describe('Access visibility for multi-user support'),
   domain: MemoryDomainSchema.optional().describe('Memory domain: value (permanent), procedural (usage-based), interrupt (TTL)'),
 });
 

@@ -33,7 +33,9 @@ First match wins. The function never throws -- it returns `null` if no key is fo
 
 ### Source Details
 
-**1. Vault API** (Tier 1, future)
+**1. Vault API** (Tier 1, NOT YET IMPLEMENTED -- proxy-side KeyVault is a stub)
+
+The portal vault (cordelia-portal) stores encryption keys protected by a user's passphrase, but this is not yet wired as a key source for the proxy's `getEncryptionKey()`. When implemented:
 
 ```javascript
 // If CORDELIA_VAULT_URL is set, call the vault

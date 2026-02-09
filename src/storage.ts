@@ -9,7 +9,7 @@
 export interface L2ItemMeta {
   type: 'entity' | 'session' | 'learning';
   owner_id?: string;
-  visibility?: 'private' | 'team' | 'public' | 'group';
+  visibility?: 'private' | 'group' | 'public';
   group_id?: string;
   author_id?: string;
   key_version?: number;
