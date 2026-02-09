@@ -144,6 +144,41 @@ export function setStorageProvider(provider: StorageProvider): void {
  * Returns the initialized provider.
  */
 /**
+ * Minimal TOML parser for flat key-value pairs with [section] headers.
+ * Handles: strings (quoted/unquoted), sections, comments, blank lines.
+ * Does NOT handle: arrays, inline tables, multiline strings, nested tables.
+ */
+function parseTOML(text: string): Record<string, Record<string, string>> {
+  const result: Record<string, Record<string, string>> = {};
+  let section: string | null = null;
+
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const secMatch = line.match(/^\[([^\]]+)\]$/);
+    if (secMatch) {
+      section = secMatch[1].trim();
+      if (!result[section]) result[section] = {};
+      continue;
+    }
+
+    const kvMatch = line.match(/^([^=]+?)\s*=\s*(.+)$/);
+    if (kvMatch && section) {
+      const key = kvMatch[1].trim();
+      let val = kvMatch[2].trim();
+      // Strip surrounding quotes
+      if ((val.startsWith('"') && val.endsWith('"')) ||
+          (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      result[section][key] = val;
+    }
+  }
+  return result;
+}
+
+/**
  * Resolve node URL and token from config.toml and file fallbacks.
  */
 async function resolveNodeConfig(): Promise<{ url: string; token: string }> {
@@ -161,12 +196,10 @@ async function resolveNodeConfig(): Promise<{ url: string; token: string }> {
         try {
           const configPath = path.join(os.homedir(), '.cordelia', 'config.toml');
           const content = await fs.readFile(configPath, 'utf-8');
-          // Simple TOML extraction for [node].api_addr
-          const nodeMatch = content.match(/\[node\][\s\S]*?api_addr\s*=\s*"?([^"\n]+)"?/);
-          if (nodeMatch) {
-            const addr = nodeMatch[1].trim();
-            const transport = content.match(/\[node\][\s\S]*?api_transport\s*=\s*"?([^"\n]+)"?/);
-            const proto = transport?.[1]?.trim() === 'https' ? 'https' : 'http';
+          const config = parseTOML(content);
+          const addr = config.node?.api_addr;
+          if (addr) {
+            const proto = config.node?.api_transport === 'https' ? 'https' : 'http';
             url = `${proto}://${addr}`;
           }
         } catch {
