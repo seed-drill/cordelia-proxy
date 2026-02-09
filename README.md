@@ -59,7 +59,7 @@ The installer automatically configures `~/.claude.json` (global MCP config):
       "command": "node",
       "args": ["/path/to/cordelia-proxy/dist/server.js"],
       "env": {
-        "CORDELIA_STORAGE": "sqlite",
+        "CORDELIA_STORAGE": "node",
         "CORDELIA_MEMORY_ROOT": "~/.cordelia/memory"
       }
     }
