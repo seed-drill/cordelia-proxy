@@ -695,12 +695,12 @@
           if (!node.dns_ok) {
             statusClass = 'dns-fail';
             statusText = 'DNS Fail';
-          } else if (!node.tcp_ok) {
+          } else if (!node.quic_ok) {
             statusClass = 'tcp-fail';
-            statusText = 'Unreachable';
+            statusText = 'No QUIC';
           } else {
             statusClass = 'ok';
-            statusText = 'Reachable';
+            statusText = 'QUIC OK';
           }
 
           const latencyText = node.latency_ms !== null ? `${node.latency_ms}ms` : '-';

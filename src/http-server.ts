@@ -579,12 +579,14 @@ app.get('/api/core/diagnostics', async (_req: Request, res: Response) => {
 
 /**
  * GET /api/core/bootnodes - Check bootnode reachability
- * Reads bootnode addresses from config.toml and probes each via TCP.
+ * Reads bootnode addresses from config.toml and probes each via UDP
+ * (QUIC runs over UDP, so TCP reachability is misleading).
+ * Sends a minimal QUIC Initial packet and checks for any UDP response.
  */
 app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
   try {
     const fs = await import('fs/promises');
-    const net = await import('net');
+    const dgram = await import('dgram');
     const os = await import('os');
     const nodePath = await import('path');
     const dns = await import('dns/promises');
@@ -611,7 +613,7 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
       port: number;
       ip: string | null;
       dns_ok: boolean;
-      tcp_ok: boolean;
+      quic_ok: boolean;
       latency_ms: number | null;
       error: string | null;
     }> = [];
@@ -627,7 +629,7 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
         port,
         ip: null,
         dns_ok: false,
-        tcp_ok: false,
+        quic_ok: false,
         latency_ms: null,
         error: null,
       };
@@ -643,19 +645,55 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
         continue;
       }
 
-      // TCP probe with timeout
+      // UDP probe: send a minimal QUIC-like Initial packet, wait for any response.
+      // A real QUIC server will reply (Version Negotiation or Retry);
+      // a dead port produces ICMP unreachable or silence.
+      const PROBE_TIMEOUT_MS = 3000;
       const start = Date.now();
       try {
         await new Promise<void>((resolve, reject) => {
-          const sock = net.createConnection({ host: entry.ip!, port, timeout: 3000 });
-          sock.on('connect', () => { sock.destroy(); resolve(); });
-          sock.on('timeout', () => { sock.destroy(); reject(new Error('timeout')); });
-          sock.on('error', (err) => { sock.destroy(); reject(err); });
+          const sock = dgram.createSocket('udp4');
+          const timer = setTimeout(() => {
+            sock.close();
+            reject(new Error('timeout'));
+          }, PROBE_TIMEOUT_MS);
+
+          // QUIC long header: 0xc0 (Initial, version 1), random DCID
+          // This is enough for a QUIC server to respond with Version Negotiation
+          const probe = Buffer.alloc(1200); // QUIC min packet size
+          probe[0] = 0xc0; // Long header, Initial packet type
+          // Version 1 (0x00000001)
+          probe[1] = 0x00; probe[2] = 0x00; probe[3] = 0x00; probe[4] = 0x01;
+          // DCID length + random bytes
+          probe[5] = 0x08;
+          crypto.randomFillSync(probe, 6, 8);
+          // SCID length 0
+          probe[14] = 0x00;
+
+          sock.on('message', () => {
+            clearTimeout(timer);
+            sock.close();
+            resolve();
+          });
+
+          sock.on('error', (err) => {
+            clearTimeout(timer);
+            sock.close();
+            reject(err);
+          });
+
+          sock.send(probe, 0, probe.length, port, entry.ip!, (err) => {
+            if (err) {
+              clearTimeout(timer);
+              sock.close();
+              reject(err);
+            }
+          });
         });
-        entry.tcp_ok = true;
+        entry.quic_ok = true;
         entry.latency_ms = Date.now() - start;
       } catch (e) {
-        entry.error = `TCP probe failed: ${(e as Error).message}`;
+        entry.error = `QUIC probe: ${(e as Error).message}`;
         entry.latency_ms = Date.now() - start;
       }
 
