@@ -673,35 +673,35 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
         }
       }
 
-      // Check node logs for QUIC connection outcome to this address
-      // Look for the resolved IP:port in log lines
+      // Check node logs for connection outcome to this address
+      // Logs use two formats:
+      //   "connection established ... addr=/ip4/1.2.3.4/tcp/9474" (multiaddr)
+      //   "dial failed: timed out addr=1.2.3.4:9474" (host:port)
       const resolvedAddr = `${entry.ip}:${port}`;
-      const connected = logLines.some(l =>
-        l.includes('connected to peer') && l.includes(resolvedAddr)
-      );
-      const dialFailed = logLines.some(l =>
-        l.includes('dial failed') && l.includes(resolvedAddr)
-      );
+      const multiAddr = `/ip4/${entry.ip}/tcp/${port}`;
 
-      // Also check for the hostname:port form
-      const connectedHost = logLines.some(l =>
-        l.includes('connected to peer') && l.includes(addr)
-      );
-      const dialFailedHost = logLines.some(l =>
-        l.includes('dial failed') && l.includes(addr)
-      );
+      // Find the LAST relevant event (connected or dial_failed) to determine current state
+      let lastConnectedIdx = -1;
+      let lastDialFailIdx = -1;
+      let lastFailLine = '';
 
-      if (connected || connectedHost) {
-        entry.quic_status = 'connected';
-      } else if (dialFailed || dialFailedHost) {
-        entry.quic_status = 'dial_failed';
-        const lastFail = logLines.filter(l =>
-          l.includes('dial failed') && (l.includes(resolvedAddr) || l.includes(addr))
-        ).pop();
-        if (lastFail) {
-          const reason = lastFail.match(/dial failed:\s*(.+?)(?:\s+addr=|$)/);
-          entry.error = reason ? reason[1].trim() : 'dial failed';
+      for (let i = 0; i < logLines.length; i++) {
+        const l = logLines[i];
+        if (l.includes('connection established') && (l.includes(multiAddr) || l.includes(resolvedAddr))) {
+          lastConnectedIdx = i;
         }
+        if (l.includes('dial failed') && (l.includes(resolvedAddr) || l.includes(addr))) {
+          lastDialFailIdx = i;
+          lastFailLine = l;
+        }
+      }
+
+      if (lastConnectedIdx > lastDialFailIdx) {
+        entry.quic_status = 'connected';
+      } else if (lastDialFailIdx > lastConnectedIdx) {
+        entry.quic_status = 'dial_failed';
+        const reason = lastFailLine.match(/dial failed:\s*(.+?)(?:\s+addr=|$)/);
+        entry.error = reason ? reason[1].trim() : 'dial failed';
       }
 
       bootnodes.push(entry);
