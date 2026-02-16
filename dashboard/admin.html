@@ -368,14 +368,13 @@
         <table class="peers-table" id="bootnodes-table">
           <thead>
             <tr>
-              <th>Status</th>
+              <th>QUIC Status</th>
               <th>Address</th>
               <th>IP</th>
-              <th>Latency</th>
             </tr>
           </thead>
           <tbody id="bootnodes-tbody">
-            <tr><td colspan="4" class="no-peers">Checking...</td></tr>
+            <tr><td colspan="3" class="no-peers">Checking...</td></tr>
           </tbody>
         </table>
       </div>
@@ -683,7 +682,7 @@
         const data = await response.json();
 
         if (!data.bootnodes || data.bootnodes.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="4" class="no-peers">No bootnodes configured</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="3" class="no-peers">No bootnodes configured</td></tr>';
           return;
         }
 
@@ -695,28 +694,29 @@
           if (!node.dns_ok) {
             statusClass = 'dns-fail';
             statusText = 'DNS Fail';
-          } else if (!node.quic_ok) {
-            statusClass = 'tcp-fail';
-            statusText = 'No QUIC';
-          } else {
+          } else if (node.quic_status === 'connected') {
             statusClass = 'ok';
-            statusText = 'QUIC OK';
+            statusText = 'Connected';
+          } else if (node.quic_status === 'dial_failed') {
+            statusClass = 'tcp-fail';
+            statusText = 'Dial Failed';
+          } else {
+            statusClass = 'tcp-fail';
+            statusText = 'Unknown';
           }
 
-          const latencyText = node.latency_ms !== null ? `${node.latency_ms}ms` : '-';
           const errorTitle = node.error ? ` title="${escapeHtml(node.error)}"` : '';
 
           tr.innerHTML = `
             <td><span class="bootnode-status ${statusClass}"${errorTitle}>${statusText}</span></td>
             <td class="monospace">${escapeHtml(node.addr)}</td>
             <td class="monospace">${escapeHtml(node.ip || '-')}</td>
-            <td>${latencyText}</td>
           `;
           tbody.appendChild(tr);
         }
       } catch (error) {
         console.error('Bootnode status error:', error);
-        tbody.innerHTML = '<tr><td colspan="4" class="no-peers">Error checking bootnodes</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3" class="no-peers">Error checking bootnodes</td></tr>';
       }
     }
 

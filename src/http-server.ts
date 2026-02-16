@@ -578,18 +578,20 @@ app.get('/api/core/diagnostics', async (_req: Request, res: Response) => {
 });
 
 /**
- * GET /api/core/bootnodes - Check bootnode reachability
- * Reads bootnode addresses from config.toml and probes each via UDP
- * (QUIC runs over UDP, so TCP reachability is misleading).
- * Sends a minimal QUIC Initial packet and checks for any UDP response.
+ * GET /api/core/bootnodes - Check bootnode status
+ * Reads bootnode addresses from config.toml, resolves DNS, and queries
+ * the core node's governor log for actual QUIC connection results.
+ * Falls back to reading recent systemd journal entries for dial outcomes.
  */
 app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
   try {
     const fs = await import('fs/promises');
-    const dgram = await import('dgram');
     const os = await import('os');
     const nodePath = await import('path');
     const dns = await import('dns/promises');
+    const { execFile } = await import('child_process');
+    const { promisify } = await import('util');
+    const execFileAsync = promisify(execFile);
 
     const configPath = nodePath.join(os.homedir(), '.cordelia', 'config.toml');
     let configText: string;
@@ -607,14 +609,35 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
       const m = section.match(/addr\s*=\s*"([^"]+)"/);
       if (m) addrMatches.push(m);
     }
+
+    // Get recent node logs for dial results (last 5 minutes)
+    // Strip ANSI escape codes since tracing output includes color sequences
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    let logLines: string[] = [];
+    try {
+      const { stdout } = await execFileAsync('journalctl', [
+        '--user', '-u', 'cordelia-node', '--since', '5 min ago',
+        '--no-pager', '-o', 'cat',
+      ], { timeout: 5000 });
+      logLines = stdout.split('\n').map(stripAnsi);
+    } catch {
+      // journalctl may not be available -- try log file fallback
+      try {
+        const logPath = nodePath.join(os.homedir(), '.cordelia', 'logs', 'cordelia-node.log');
+        const logContent = await fs.readFile(logPath, 'utf-8');
+        logLines = logContent.split('\n').slice(-200).map(stripAnsi);
+      } catch {
+        // No logs available
+      }
+    }
+
     const bootnodes: Array<{
       addr: string;
       host: string;
       port: number;
       ip: string | null;
       dns_ok: boolean;
-      quic_ok: boolean;
-      latency_ms: number | null;
+      quic_status: 'connected' | 'dial_failed' | 'unknown';
       error: string | null;
     }> = [];
 
@@ -629,78 +652,86 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
         port,
         ip: null,
         dns_ok: false,
-        quic_ok: false,
-        latency_ms: null,
+        quic_status: 'unknown',
         error: null,
       };
 
-      // DNS resolution
-      try {
-        const addresses = await dns.resolve4(host);
-        entry.ip = addresses[0] || null;
-        entry.dns_ok = !!entry.ip;
-      } catch (e) {
-        entry.error = `DNS failed: ${(e as Error).message}`;
-        bootnodes.push(entry);
-        continue;
+      // DNS resolution (skip for IP literals)
+      const isIpLiteral = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+      if (isIpLiteral) {
+        entry.ip = host;
+        entry.dns_ok = true;
+      } else {
+        try {
+          const addresses = await dns.resolve4(host);
+          entry.ip = addresses[0] || null;
+          entry.dns_ok = !!entry.ip;
+        } catch (e) {
+          entry.error = `DNS failed: ${(e as Error).message}`;
+          bootnodes.push(entry);
+          continue;
+        }
       }
 
-      // UDP probe: send a minimal QUIC-like Initial packet, wait for any response.
-      // A real QUIC server will reply (Version Negotiation or Retry);
-      // a dead port produces ICMP unreachable or silence.
-      const PROBE_TIMEOUT_MS = 3000;
-      const start = Date.now();
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const sock = dgram.createSocket('udp4');
-          const timer = setTimeout(() => {
-            sock.close();
-            reject(new Error('timeout'));
-          }, PROBE_TIMEOUT_MS);
+      // Check node logs for QUIC connection outcome to this address
+      // Look for the resolved IP:port in log lines
+      const resolvedAddr = `${entry.ip}:${port}`;
+      const connected = logLines.some(l =>
+        l.includes('connected to peer') && l.includes(resolvedAddr)
+      );
+      const dialFailed = logLines.some(l =>
+        l.includes('dial failed') && l.includes(resolvedAddr)
+      );
 
-          // QUIC long header: 0xc0 (Initial, version 1), random DCID
-          // This is enough for a QUIC server to respond with Version Negotiation
-          const probe = Buffer.alloc(1200); // QUIC min packet size
-          probe[0] = 0xc0; // Long header, Initial packet type
-          // Version 1 (0x00000001)
-          probe[1] = 0x00; probe[2] = 0x00; probe[3] = 0x00; probe[4] = 0x01;
-          // DCID length + random bytes
-          probe[5] = 0x08;
-          crypto.randomFillSync(probe, 6, 8);
-          // SCID length 0
-          probe[14] = 0x00;
+      // Also check for the hostname:port form
+      const connectedHost = logLines.some(l =>
+        l.includes('connected to peer') && l.includes(addr)
+      );
+      const dialFailedHost = logLines.some(l =>
+        l.includes('dial failed') && l.includes(addr)
+      );
 
-          sock.on('message', () => {
-            clearTimeout(timer);
-            sock.close();
-            resolve();
-          });
-
-          sock.on('error', (err) => {
-            clearTimeout(timer);
-            sock.close();
-            reject(err);
-          });
-
-          sock.send(probe, 0, probe.length, port, entry.ip!, (err) => {
-            if (err) {
-              clearTimeout(timer);
-              sock.close();
-              reject(err);
-            }
-          });
-        });
-        entry.quic_ok = true;
-        entry.latency_ms = Date.now() - start;
-      } catch (e) {
-        entry.error = `QUIC probe: ${(e as Error).message}`;
-        entry.latency_ms = Date.now() - start;
+      if (connected || connectedHost) {
+        entry.quic_status = 'connected';
+      } else if (dialFailed || dialFailedHost) {
+        entry.quic_status = 'dial_failed';
+        const lastFail = logLines.filter(l =>
+          l.includes('dial failed') && (l.includes(resolvedAddr) || l.includes(addr))
+        ).pop();
+        if (lastFail) {
+          const reason = lastFail.match(/dial failed:\s*(.+?)(?:\s+addr=|$)/);
+          entry.error = reason ? reason[1].trim() : 'dial failed';
+        }
       }
 
       bootnodes.push(entry);
     }
 
-    res.json({ bootnodes });
+    // Also include current peer count from core status
+    let peerCount = 0;
+    if (CORDELIA_CORE_API) {
+      try {
+        let bearerToken = process.env.CORDELIA_NODE_TOKEN || '';
+        if (!bearerToken) {
+          try {
+            bearerToken = (await fs.readFile(nodePath.join(os.homedir(), '.cordelia', 'node-token'), 'utf-8')).trim();
+          } catch { /* */ }
+        }
+        const statusRes = await fetch(`${CORDELIA_CORE_API}/api/v1/status`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+          },
+        });
+        if (statusRes.ok) {
+          const s = await statusRes.json() as { peers_warm: number; peers_hot: number };
+          peerCount = (s.peers_warm || 0) + (s.peers_hot || 0);
+        }
+      } catch { /* */ }
+    }
+
+    res.json({ bootnodes, peers_total: peerCount });
   } catch (error) {
     const err = error as Error;
     res.status(500).json({ error: err.message });
