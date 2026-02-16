@@ -639,10 +639,11 @@
 
       // Update header with user
       const headerActions = document.getElementById('header-actions');
+      const userLabel = auth.github_login || auth.cordelia_user || auth.username || '';
       headerActions.innerHTML = `
-        <span style="font-size: 0.9rem; opacity: 0.9;">@${auth.github_login}</span>
+        ${userLabel ? `<span style="font-size: 0.9rem; opacity: 0.9;">@${userLabel}</span>` : ''}
         <a href="/" class="back-link">Dashboard</a>
-        <button class="logout-btn" onclick="logout()">Logout</button>
+        ${auth.auth_type !== 'local' ? `<button class="logout-btn" onclick="logout()">Logout</button>` : ''}
       `;
 
       loadAdminData();
