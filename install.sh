@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Cordelia Universal Installer
-# Usage: curl -fsSL https://seeddrill.ai/install.sh | sh -s -- <user_id>
+# Usage: curl -fsSL https://seeddrill.ai/install.sh | bash -s -- <user_id>
 #    or: ./install.sh <user_id> [--no-embeddings]
 #
 # Phases:
@@ -63,7 +63,7 @@ for arg in "$@"; do
             echo "Cordelia Universal Installer"
             echo ""
             echo "Usage: ./install.sh <user_id> [--no-embeddings]"
-            echo "   or: curl -fsSL https://seeddrill.ai/install.sh | sh -s -- <user_id>"
+            echo "   or: curl -fsSL https://seeddrill.ai/install.sh | bash -s -- <user_id>"
             echo ""
             echo "Options:"
             echo "  --no-embeddings    Skip Ollama (Intel Macs, simpler setup)"
@@ -81,7 +81,7 @@ if [[ -z "$USER_ID" ]]; then
     echo "Cordelia Universal Installer"
     echo ""
     echo "Usage: ./install.sh <user_id>"
-    echo "   or: curl -fsSL https://seeddrill.ai/install.sh | sh -s -- <user_id>"
+    echo "   or: curl -fsSL https://seeddrill.ai/install.sh | bash -s -- <user_id>"
     exit 1
 fi
 

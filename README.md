@@ -41,7 +41,7 @@ L2 items are encrypted at rest using AES-256-GCM with scrypt key derivation. Emb
 **For end users:** Use the SDK installer:
 
 ```bash
-curl -fsSL https://seeddrill.ai/install.sh | sh -s -- <your-username>
+curl -fsSL https://seeddrill.ai/install.sh | bash -s -- <your-username>
 ```
 
 See **[cordelia-agent-sdk](https://github.com/seed-drill/cordelia-agent-sdk)** for full instructions.
