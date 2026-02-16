@@ -238,7 +238,21 @@ function createLocalSession(username: string, cordeliaUser: string | null): stri
 /**
  * GET /auth/status - Check if user is authenticated
  */
-app.get('/auth/status', (req: Request, res: Response) => {
+app.get('/auth/status', async (req: Request, res: Response) => {
+  if (LOCAL_MODE) {
+    const users = await listUsers();
+    const defaultUser = users[0] || null;
+    res.json({
+      authenticated: true,
+      auth_type: 'local',
+      username: 'local',
+      cordelia_user: defaultUser,
+      github_enabled: false,
+      local_enabled: true,
+    });
+    return;
+  }
+
   const session = getSession(req);
 
   if (!session) {
@@ -655,8 +669,13 @@ app.put('/api/hot/:userId', async (req: Request, res: Response) => {
 
     let isAuthorized = false;
 
+    // Local mode bypasses auth entirely
+    if (LOCAL_MODE) {
+      isAuthorized = true;
+    }
+
     // Check per-user API key auth first
-    if (apiKey) {
+    if (!isAuthorized && apiKey) {
       const existingContext = await loadHotContext(userId);
       if (existingContext?.identity?.api_key && existingContext.identity.api_key === apiKey) {
         isAuthorized = true;
@@ -946,18 +965,20 @@ app.post('/api/signup', (req: Request, res: Response) => {
  */
 app.post('/api/profile/:userId/api-key', async (req: Request, res: Response) => {
   const session = getSession(req);
-  const userId = req.params.userId;
+  const userId = req.params.userId as string;
 
-  // Must be authenticated
-  if (!session) {
-    res.status(401).json({ error: 'unauthorized', detail: 'Must be logged in' });
-    return;
-  }
+  if (!LOCAL_MODE) {
+    // Must be authenticated
+    if (!session) {
+      res.status(401).json({ error: 'unauthorized', detail: 'Must be logged in' });
+      return;
+    }
 
-  // Can only generate API key for own profile
-  if (session.username !== userId && session.cordelia_user !== userId) {
-    res.status(403).json({ error: 'forbidden', detail: 'Can only generate API key for your own profile' });
-    return;
+    // Can only generate API key for own profile
+    if (session.username !== userId && session.cordelia_user !== userId) {
+      res.status(403).json({ error: 'forbidden', detail: 'Can only generate API key for your own profile' });
+      return;
+    }
   }
 
   try {
@@ -1004,20 +1025,21 @@ app.post('/api/profile/:userId/api-key', async (req: Request, res: Response) => 
  */
 app.delete('/api/profile/:userId', async (req: Request, res: Response) => {
   const session = getSession(req);
-
-  // Must be authenticated
-  if (!session) {
-    res.status(401).json({ error: 'unauthorized', detail: 'Must be logged in' });
-    return;
-  }
-
-  const userId = req.params.userId;
+  const userId = req.params.userId as string;
   const deleteL2 = req.query.deleteL2 === 'true';
 
-  // Can only delete own profile (unless admin - future feature)
-  if (session.cordelia_user !== userId) {
-    res.status(403).json({ error: 'forbidden', detail: 'Can only delete your own profile' });
-    return;
+  if (!LOCAL_MODE) {
+    // Must be authenticated
+    if (!session) {
+      res.status(401).json({ error: 'unauthorized', detail: 'Must be logged in' });
+      return;
+    }
+
+    // Can only delete own profile (unless admin - future feature)
+    if (session.cordelia_user !== userId) {
+      res.status(403).json({ error: 'forbidden', detail: 'Can only delete your own profile' });
+      return;
+    }
   }
 
   try {
@@ -1064,19 +1086,20 @@ app.delete('/api/profile/:userId', async (req: Request, res: Response) => {
  */
 app.get('/api/profile/:userId/export', async (req: Request, res: Response) => {
   const session = getSession(req);
+  const userId = req.params.userId as string;
 
-  // Must be authenticated
-  if (!session) {
-    res.status(401).json({ error: 'unauthorized', detail: 'Must be logged in' });
-    return;
-  }
+  if (!LOCAL_MODE) {
+    // Must be authenticated
+    if (!session) {
+      res.status(401).json({ error: 'unauthorized', detail: 'Must be logged in' });
+      return;
+    }
 
-  const userId = req.params.userId;
-
-  // Can only export own profile
-  if (session.cordelia_user !== userId) {
-    res.status(403).json({ error: 'forbidden', detail: 'Can only export your own profile' });
-    return;
+    // Can only export own profile
+    if (session.cordelia_user !== userId) {
+      res.status(403).json({ error: 'forbidden', detail: 'Can only export your own profile' });
+      return;
+    }
   }
 
   try {
@@ -1137,7 +1160,7 @@ app.get('/api/admin/users', async (req: Request, res: Response) => {
   const session = getSession(req);
 
   // Must be authenticated (future: check admin role)
-  if (!session) {
+  if (!LOCAL_MODE && !session) {
     res.status(401).json({ error: 'unauthorized', detail: 'Must be logged in' });
     return;
   }
@@ -1576,7 +1599,7 @@ async function initEncryption(): Promise<void> {
  */
 export async function startServer(opts?: { port?: number; host?: string; memoryRoot?: string }): Promise<import('http').Server> {
   const port = opts?.port ?? PORT;
-  const host = opts?.host ?? (LOCAL_MODE ? '127.0.0.1' : (process.env.HOST ?? '0.0.0.0'));
+  const host = opts?.host ?? (process.env.CORDELIA_HTTP_HOST ?? (LOCAL_MODE ? '127.0.0.1' : (process.env.HOST ?? '0.0.0.0')));
   const memRoot = opts?.memoryRoot ?? MEMORY_ROOT;
 
   const storageProvider = await initStorageProvider(memRoot);
