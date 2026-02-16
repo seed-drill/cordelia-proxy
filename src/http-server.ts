@@ -578,6 +578,98 @@ app.get('/api/core/diagnostics', async (_req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/core/bootnodes - Check bootnode reachability
+ * Reads bootnode addresses from config.toml and probes each via TCP.
+ */
+app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
+  try {
+    const fs = await import('fs/promises');
+    const net = await import('net');
+    const os = await import('os');
+    const nodePath = await import('path');
+    const dns = await import('dns/promises');
+
+    const configPath = nodePath.join(os.homedir(), '.cordelia', 'config.toml');
+    let configText: string;
+    try {
+      configText = await fs.readFile(configPath, 'utf-8');
+    } catch {
+      res.json({ bootnodes: [], error: 'config.toml not found' });
+      return;
+    }
+
+    // Extract bootnode addresses from [[network.bootnodes]] sections only
+    const bootnodeSection = configText.split(/\[\[network\.bootnodes\]\]/g).slice(1);
+    const addrMatches: RegExpMatchArray[] = [];
+    for (const section of bootnodeSection) {
+      const m = section.match(/addr\s*=\s*"([^"]+)"/);
+      if (m) addrMatches.push(m);
+    }
+    const bootnodes: Array<{
+      addr: string;
+      host: string;
+      port: number;
+      ip: string | null;
+      dns_ok: boolean;
+      tcp_ok: boolean;
+      latency_ms: number | null;
+      error: string | null;
+    }> = [];
+
+    for (const match of addrMatches) {
+      const addr = match[1];
+      const [host, portStr] = addr.split(':');
+      const port = parseInt(portStr, 10);
+
+      const entry: typeof bootnodes[number] = {
+        addr,
+        host,
+        port,
+        ip: null,
+        dns_ok: false,
+        tcp_ok: false,
+        latency_ms: null,
+        error: null,
+      };
+
+      // DNS resolution
+      try {
+        const addresses = await dns.resolve4(host);
+        entry.ip = addresses[0] || null;
+        entry.dns_ok = !!entry.ip;
+      } catch (e) {
+        entry.error = `DNS failed: ${(e as Error).message}`;
+        bootnodes.push(entry);
+        continue;
+      }
+
+      // TCP probe with timeout
+      const start = Date.now();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const sock = net.createConnection({ host: entry.ip!, port, timeout: 3000 });
+          sock.on('connect', () => { sock.destroy(); resolve(); });
+          sock.on('timeout', () => { sock.destroy(); reject(new Error('timeout')); });
+          sock.on('error', (err) => { sock.destroy(); reject(err); });
+        });
+        entry.tcp_ok = true;
+        entry.latency_ms = Date.now() - start;
+      } catch (e) {
+        entry.error = `TCP probe failed: ${(e as Error).message}`;
+        entry.latency_ms = Date.now() - start;
+      }
+
+      bootnodes.push(entry);
+    }
+
+    res.json({ bootnodes });
+  } catch (error) {
+    const err = error as Error;
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /api/peers - P2P network peer status (proxied from core node)
  * @deprecated Use /api/core/status instead
  */

@@ -273,6 +273,30 @@
       font-size: 0.75rem;
       color: var(--color-muted);
     }
+
+    .bootnode-status {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 10px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .bootnode-status.ok {
+      background: var(--color-deep-green);
+      color: white;
+    }
+
+    .bootnode-status.dns-fail {
+      background: #c00;
+      color: white;
+    }
+
+    .bootnode-status.tcp-fail {
+      background: var(--color-copper);
+      color: white;
+    }
   </style>
 </head>
 <body>
@@ -336,6 +360,24 @@
           <div class="count" id="network-status">-</div>
           <div class="label">Network</div>
         </div>
+      </div>
+
+      <!-- Bootnode Status -->
+      <div class="peer-list-panel" id="bootnode-panel">
+        <h3>Bootnode Servers</h3>
+        <table class="peers-table" id="bootnodes-table">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Address</th>
+              <th>IP</th>
+              <th>Latency</th>
+            </tr>
+          </thead>
+          <tbody id="bootnodes-tbody">
+            <tr><td colspan="4" class="no-peers">Checking...</td></tr>
+          </tbody>
+        </table>
       </div>
 
       <!-- Peer List -->
@@ -633,6 +675,51 @@
       }
     }
 
+    async function loadBootnodeStatus() {
+      const tbody = document.getElementById('bootnodes-tbody');
+
+      try {
+        const response = await fetch(`${API_BASE}/api/core/bootnodes`);
+        const data = await response.json();
+
+        if (!data.bootnodes || data.bootnodes.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="4" class="no-peers">No bootnodes configured</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = '';
+        for (const node of data.bootnodes) {
+          const tr = document.createElement('tr');
+          let statusClass, statusText;
+
+          if (!node.dns_ok) {
+            statusClass = 'dns-fail';
+            statusText = 'DNS Fail';
+          } else if (!node.tcp_ok) {
+            statusClass = 'tcp-fail';
+            statusText = 'Unreachable';
+          } else {
+            statusClass = 'ok';
+            statusText = 'Reachable';
+          }
+
+          const latencyText = node.latency_ms !== null ? `${node.latency_ms}ms` : '-';
+          const errorTitle = node.error ? ` title="${escapeHtml(node.error)}"` : '';
+
+          tr.innerHTML = `
+            <td><span class="bootnode-status ${statusClass}"${errorTitle}>${statusText}</span></td>
+            <td class="monospace">${escapeHtml(node.addr)}</td>
+            <td class="monospace">${escapeHtml(node.ip || '-')}</td>
+            <td>${latencyText}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      } catch (error) {
+        console.error('Bootnode status error:', error);
+        tbody.innerHTML = '<tr><td colspan="4" class="no-peers">Error checking bootnodes</td></tr>';
+      }
+    }
+
     async function init() {
       const auth = await checkAuth();
       if (!auth) return;
@@ -649,10 +736,12 @@
       loadAdminData();
       loadCoreStatus();
       loadPeerList();
+      loadBootnodeStatus();
 
       // Refresh status every 30 seconds
       setInterval(loadCoreStatus, 30000);
       setInterval(loadPeerList, 30000);
+      setInterval(loadBootnodeStatus, 30000);
     }
 
     async function logout() {
