@@ -22,6 +22,7 @@ const refsContent = document.getElementById('refs-content');
 const ephemeralContent = document.getElementById('ephemeral-content');
 const l2Content = document.getElementById('l2-content');
 const networkContent = document.getElementById('network-content');
+const groupsContent = document.getElementById('groups-content');
 
 // Auth state
 let currentAuth = null;
@@ -283,10 +284,15 @@ async function checkAuth() {
   }
 }
 
+// Current identity data (kept in sync for edit mode)
+let currentIdentity = null;
+
 /**
- * Render identity card
+ * Render identity card (view mode)
  */
 function renderIdentity(identity) {
+  currentIdentity = identity;
+
   const primaryOrg = identity.orgs?.[0];
   const orgDisplay = primaryOrg
     ? `${primaryOrg.role} @ ${primaryOrg.name}`
@@ -328,8 +334,115 @@ function renderIdentity(identity) {
     <div class="identity-roles">${rolesHtml}${githubBadge}</div>
     ${interestsSection}
     ${heroesSection}
+    <div class="identity-edit-toolbar">
+      <button class="btn btn-secondary" onclick="showIdentityEdit()">Edit</button>
+    </div>
   `;
 }
+
+/**
+ * Show identity edit form
+ */
+function showIdentityEdit() {
+  const id = currentIdentity;
+  if (!id) return;
+
+  identityContent.innerHTML = `
+    <div class="identity-edit-form">
+      <div class="edit-field">
+        <label for="edit-name">Name</label>
+        <input type="text" id="edit-name" value="${escapeHtml(id.name || '')}" />
+      </div>
+      <div class="edit-field">
+        <label for="edit-github">GitHub ID</label>
+        <input type="text" id="edit-github" value="${escapeHtml(id.github_id || '')}" />
+      </div>
+      <div class="edit-field">
+        <label for="edit-tz">Timezone</label>
+        <input type="text" id="edit-tz" value="${escapeHtml(id.tz || '')}" placeholder="e.g. Europe/London" />
+      </div>
+      <div class="edit-field">
+        <label for="edit-interests">Interests <span class="edit-hint">comma-separated</span></label>
+        <input type="text" id="edit-interests" value="${escapeHtml((id.interests || []).join(', '))}" placeholder="e.g. distributed systems, music" />
+      </div>
+      <div class="edit-field">
+        <label for="edit-heroes">Heroes <span class="edit-hint">comma-separated</span></label>
+        <input type="text" id="edit-heroes" value="${escapeHtml((id.heroes || []).join(', '))}" placeholder="e.g. Alan Turing, Grace Hopper" />
+      </div>
+      <div class="edit-actions">
+        <button class="btn btn-primary" onclick="saveIdentity()">Save</button>
+        <button class="btn btn-secondary" onclick="cancelIdentityEdit()">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('edit-name').focus();
+}
+
+/**
+ * Cancel identity edit, return to view mode
+ */
+function cancelIdentityEdit() {
+  if (currentIdentity) renderIdentity(currentIdentity);
+}
+
+/**
+ * Parse comma-separated string into trimmed array, filtering empty strings
+ */
+function parseCommaSeparated(value) {
+  return value.split(',').map(s => s.trim()).filter(s => s.length > 0);
+}
+
+/**
+ * Save identity edits via read-modify-write on full L1 context
+ */
+async function saveIdentity() {
+  const userSelect = document.getElementById('user-select');
+  const userId = userSelect?.value;
+  if (!userId) { alert('No user selected'); return; }
+
+  const name = document.getElementById('edit-name').value.trim();
+  if (!name) { alert('Name is required'); return; }
+
+  try {
+    // Read current full L1 context
+    const getRes = await fetch(`${API_BASE}/api/hot/${encodeURIComponent(userId)}`);
+    if (!getRes.ok) throw new Error('Failed to read current profile');
+    const context = await getRes.json();
+
+    // Update identity fields
+    context.identity.name = name;
+    context.identity.github_id = document.getElementById('edit-github').value.trim() || undefined;
+    context.identity.tz = document.getElementById('edit-tz').value.trim() || undefined;
+    context.identity.interests = parseCommaSeparated(document.getElementById('edit-interests').value);
+    context.identity.heroes = parseCommaSeparated(document.getElementById('edit-heroes').value);
+
+    // Update timestamp
+    context.updated_at = new Date().toISOString();
+
+    // Write back
+    const putRes = await fetch(`${API_BASE}/api/hot/${encodeURIComponent(userId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(context),
+    });
+
+    if (!putRes.ok) {
+      const err = await putRes.json();
+      throw new Error(err.error || putRes.statusText);
+    }
+
+    // Re-render with updated data
+    renderIdentity(context.identity);
+  } catch (error) {
+    console.error('Save identity failed:', error);
+    alert('Failed to save: ' + error.message);
+  }
+}
+
+// Make identity edit functions available globally
+window.showIdentityEdit = showIdentityEdit;
+window.cancelIdentityEdit = cancelIdentityEdit;
+window.saveIdentity = saveIdentity;
 
 /**
  * Render active state card
@@ -666,6 +779,254 @@ async function loadNetworkHealth() {
 }
 
 /**
+ * Render groups table
+ */
+function renderGroups(groups, peers) {
+  const userId = currentAuth?.cordelia_user;
+
+  // Build a map: groupId -> list of peers that have this group
+  const peersByGroup = {};
+  if (peers && peers.length > 0) {
+    for (const peer of peers) {
+      const peerGroups = peer.groups || [];
+      const shortId = peer.node_id ? peer.node_id.substring(0, 12) + '...' : '?';
+      const stateClass = peer.state === 'hot' ? 'peer-hot' : 'peer-warm';
+      for (const gid of peerGroups) {
+        if (!peersByGroup[gid]) peersByGroup[gid] = [];
+        peersByGroup[gid].push({ shortId, fullId: peer.node_id, state: peer.state, stateClass });
+      }
+    }
+  }
+
+  if (!groups || groups.length === 0) {
+    groupsContent.innerHTML = `
+      <p style="color: var(--color-muted); margin-bottom: 0.5rem;">No groups yet.</p>
+      <div class="groups-toolbar">
+        <button class="btn btn-primary" onclick="showCreateGroupForm()">Create Group</button>
+      </div>
+    `;
+    return;
+  }
+
+  const rowsHtml = groups.map(group => {
+    const members = group.members || [];
+    const myMembership = userId ? members.find(m => m.entity_id === userId) : null;
+    const myRole = myMembership ? myMembership.role : null;
+
+    // Members display
+    const membersHtml = members.map(m => {
+      const roleClass = `role-${m.role}`;
+      return `<span class="member-chip">${escapeHtml(m.entity_id)} <span class="role-tag ${roleClass}">${m.role}</span></span>`;
+    }).join('');
+
+    // Peers display
+    const groupPeers = peersByGroup[group.id] || [];
+    const peersHtml = groupPeers.length > 0
+      ? groupPeers.map(p =>
+          `<span class="peer-chip ${p.stateClass}" title="${escapeHtml(p.fullId)}">${escapeHtml(p.shortId)} <span class="peer-state">${p.state}</span></span>`
+        ).join('')
+      : '<span style="color: var(--color-muted); font-size: 0.8rem;">Local only</span>';
+
+    // Culture display
+    let cultureDisplay = '';
+    if (group.culture) {
+      try {
+        const c = typeof group.culture === 'string' ? JSON.parse(group.culture) : group.culture;
+        cultureDisplay = escapeHtml(c.broadcast_eagerness || JSON.stringify(c));
+      } catch {
+        cultureDisplay = escapeHtml(String(group.culture));
+      }
+    }
+
+    // Role display
+    const roleHtml = myRole
+      ? `<span class="role-tag role-${myRole}">${myRole}</span>`
+      : '<span style="color: var(--color-muted);">\u2014</span>';
+
+    // Actions
+    let actionsHtml = '';
+    if (!myRole) {
+      actionsHtml += `<button class="btn-join" onclick="joinGroup('${escapeHtml(group.id)}')">Join</button>`;
+    } else {
+      actionsHtml += `<button class="btn-leave" onclick="leaveGroup('${escapeHtml(group.id)}')">Leave</button>`;
+    }
+    if (myRole === 'owner') {
+      actionsHtml += `<button class="btn-delete-group" onclick="deleteGroup('${escapeHtml(group.id)}')">Delete</button>`;
+    }
+
+    return `
+      <tr>
+        <td><strong>${escapeHtml(group.name)}</strong><br><span style="font-size: 0.8rem; color: var(--color-muted);">${escapeHtml(group.id)}</span></td>
+        <td><div class="member-list">${membersHtml || '<span style="color: var(--color-muted);">None</span>'}</div></td>
+        <td><div class="peer-list">${peersHtml}</div></td>
+        <td>${cultureDisplay || '<span style="color: var(--color-muted);">\u2014</span>'}</td>
+        <td>${roleHtml}</td>
+        <td><div class="actions-cell">${actionsHtml}</div></td>
+      </tr>
+    `;
+  }).join('');
+
+  groupsContent.innerHTML = `
+    <table class="groups-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Members</th>
+          <th>Peers</th>
+          <th>Culture</th>
+          <th>Your Role</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+    <div class="groups-toolbar">
+      <button class="btn btn-primary" onclick="showCreateGroupForm()">Create Group</button>
+    </div>
+  `;
+}
+
+/**
+ * Load groups from API and render
+ */
+async function loadGroups() {
+  try {
+    const [groupsRes, peersRes] = await Promise.all([
+      fetch(`${API_BASE}/api/groups`),
+      fetch(`${API_BASE}/api/peers`).catch(() => null),
+    ]);
+    if (!groupsRes.ok) throw new Error(`Failed to load groups: ${groupsRes.statusText}`);
+    const groupsData = await groupsRes.json();
+    const peersData = peersRes && peersRes.ok ? await peersRes.json() : null;
+    renderGroups(groupsData.groups || [], peersData?.peers || []);
+  } catch (error) {
+    console.error('Error loading groups:', error);
+    groupsContent.innerHTML = `<p style="color: #dc3545;">Failed to load groups: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
+/**
+ * Join a group
+ */
+async function joinGroup(groupId) {
+  const entityId = currentAuth?.cordelia_user;
+  if (!entityId) { alert('No user authenticated'); return; }
+
+  try {
+    const response = await fetch(`${API_BASE}/api/groups/${encodeURIComponent(groupId)}/members`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entity_id: entityId }),
+    });
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || response.statusText);
+    }
+    await loadGroups();
+  } catch (error) {
+    console.error('Join group failed:', error);
+    alert('Failed to join group: ' + error.message);
+  }
+}
+
+/**
+ * Leave a group
+ */
+async function leaveGroup(groupId) {
+  const entityId = currentAuth?.cordelia_user;
+  if (!entityId) { alert('No user authenticated'); return; }
+
+  try {
+    const response = await fetch(
+      `${API_BASE}/api/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(entityId)}`,
+      { method: 'DELETE' }
+    );
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || response.statusText);
+    }
+    await loadGroups();
+  } catch (error) {
+    console.error('Leave group failed:', error);
+    alert('Failed to leave group: ' + error.message);
+  }
+}
+
+/**
+ * Delete a group (with confirmation)
+ */
+async function deleteGroup(groupId) {
+  if (!confirm(`Delete group "${groupId}"? This cannot be undone.`)) return;
+
+  try {
+    const response = await fetch(`${API_BASE}/api/groups/${encodeURIComponent(groupId)}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || response.statusText);
+    }
+    await loadGroups();
+  } catch (error) {
+    console.error('Delete group failed:', error);
+    alert('Failed to delete group: ' + error.message);
+  }
+}
+
+/**
+ * Show the create group inline form
+ */
+function showCreateGroupForm() {
+  document.getElementById('groups-create-form').style.display = 'block';
+  document.getElementById('group-id-input').focus();
+}
+
+/**
+ * Hide the create group inline form
+ */
+function hideCreateGroupForm() {
+  document.getElementById('groups-create-form').style.display = 'none';
+  document.getElementById('group-id-input').value = '';
+  document.getElementById('group-name-input').value = '';
+}
+
+/**
+ * Submit the create group form
+ */
+async function submitCreateGroup() {
+  const id = document.getElementById('group-id-input').value.trim();
+  const name = document.getElementById('group-name-input').value.trim();
+  const entityId = currentAuth?.cordelia_user;
+
+  if (!id || !name) { alert('Both ID and Name are required'); return; }
+
+  try {
+    const response = await fetch(`${API_BASE}/api/groups`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name, entity_id: entityId }),
+    });
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || response.statusText);
+    }
+    hideCreateGroupForm();
+    await loadGroups();
+  } catch (error) {
+    console.error('Create group failed:', error);
+    alert('Failed to create group: ' + error.message);
+  }
+}
+
+// Make groups functions available globally
+window.joinGroup = joinGroup;
+window.leaveGroup = leaveGroup;
+window.deleteGroup = deleteGroup;
+window.showCreateGroupForm = showCreateGroupForm;
+window.hideCreateGroupForm = hideCreateGroupForm;
+window.submitCreateGroup = submitCreateGroup;
+
+/**
  * Load and display data for a user
  */
 async function loadUserData(userId) {
@@ -693,6 +1054,9 @@ async function loadUserData(userId) {
     renderKeyRefs(hotData.identity);
     renderEphemeral(hotData.ephemeral, hotData.updated_at);
     renderL2Summary(l2Data);
+
+    // Load groups (independent of L1 data)
+    loadGroups();
 
     // Update status line
     statusLine.textContent = `Updated: ${hotData.updated_at} | Version: ${hotData.version}`;
@@ -775,9 +1139,10 @@ async function init() {
     showDashboardContainer();
     // Load users and data
     loadUsers();
-    // Start network health polling
+    // Start network health and groups polling
     loadNetworkHealth();
     setInterval(loadNetworkHealth, 30000);
+    setInterval(loadGroups, 30000);
   } else {
     // Show landing page for unauthenticated users
     showLanding();

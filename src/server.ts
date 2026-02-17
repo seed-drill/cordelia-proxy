@@ -143,7 +143,10 @@ async function main(): Promise<void> {
       const { getNodeBridge } = await import('./node-bridge.js');
       const bridge = getNodeBridge();
       if (await bridge.isAvailable()) {
-        await bridge.syncGroups(storageProvider);
+        const groupSync = await bridge.syncGroups(storageProvider);
+        if (groupSync.pulled > 0 || groupSync.pushed > 0) {
+          console.error(`Cordelia: group sync — pulled ${groupSync.pulled} from node, pushed ${groupSync.pushed} to node`);
+        }
         const allGroups = await storageProvider.listGroups();
         const groupIds = allGroups.map((g) => g.id);
         const result = await bridge.syncGroupItems(groupIds, storageProvider);

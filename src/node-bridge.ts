@@ -134,6 +134,52 @@ export class NodeBridge {
     });
   }
 
+  /**
+   * Push a group creation to the core node. Fire-and-forget.
+   */
+  async pushCreateGroup(
+    groupId: string,
+    name: string,
+    culture?: string,
+    securityPolicy?: string,
+    ownerId?: string,
+  ): Promise<void> {
+    const client = await this.getClient();
+    if (!client || !(await this.isAvailable())) return;
+
+    await client.createGroup(groupId, name, culture, securityPolicy);
+    if (ownerId) {
+      await client.addMember(groupId, ownerId, 'owner');
+    }
+  }
+
+  /**
+   * Push a group deletion to the core node. Fire-and-forget.
+   */
+  async pushDeleteGroup(groupId: string): Promise<void> {
+    const client = await this.getClient();
+    if (!client || !(await this.isAvailable())) return;
+    await client.deleteGroup(groupId);
+  }
+
+  /**
+   * Push a member addition to the core node. Fire-and-forget.
+   */
+  async pushAddMember(groupId: string, entityId: string, role?: string): Promise<void> {
+    const client = await this.getClient();
+    if (!client || !(await this.isAvailable())) return;
+    await client.addMember(groupId, entityId, role);
+  }
+
+  /**
+   * Push a member removal to the core node. Fire-and-forget.
+   */
+  async pushRemoveMember(groupId: string, entityId: string): Promise<void> {
+    const client = await this.getClient();
+    if (!client || !(await this.isAvailable())) return;
+    await client.removeMember(groupId, entityId);
+  }
+
   private async syncGroupMembers(client: NodeClient, groupId: string, storage: StorageProvider): Promise<void> {
     const remote = await client.readGroup(groupId);
     if (!remote) return;
@@ -151,23 +197,26 @@ export class NodeBridge {
   }
 
   /**
-   * Sync groups from the P2P network into local storage.
-   * Creates locally any groups that exist on the network but not locally.
+   * Bidirectional group sync between local storage and P2P network.
+   * - Pulls groups from core that don't exist locally (core → proxy)
+   * - Pushes local groups to core that don't exist remotely (proxy → core)
    */
-  async syncGroups(storage: StorageProvider): Promise<{ created: number }> {
+  async syncGroups(storage: StorageProvider): Promise<{ pulled: number; pushed: number }> {
     const client = await this.getClient();
-    if (!client) return { created: 0 };
+    if (!client) return { pulled: 0, pushed: 0 };
 
     const remoteGroups = await client.listGroups();
     const localGroups = await storage.listGroups();
     const localIds = new Set(localGroups.map((g) => g.id));
+    const remoteIds = new Set(remoteGroups.map((g) => g.id));
 
-    let created = 0;
+    // Core → Proxy: pull missing groups
+    let pulled = 0;
     for (const rg of remoteGroups) {
       if (!localIds.has(rg.id)) {
         try {
           await storage.createGroup(rg.id, rg.name, rg.culture, rg.security_policy);
-          created++;
+          pulled++;
         } catch (e) {
           console.error(`Cordelia: failed to create local group ${rg.id}: ${(e as Error).message}`);
         }
@@ -181,7 +230,30 @@ export class NodeBridge {
       }
     }
 
-    return { created };
+    // Proxy → Core: push local-only groups
+    let pushed = 0;
+    for (const lg of localGroups) {
+      if (!remoteIds.has(lg.id)) {
+        try {
+          await client.createGroup(lg.id, lg.name, lg.culture, lg.security_policy);
+          pushed++;
+
+          // Also push members for the group
+          const members = await storage.listMembers(lg.id);
+          for (const m of members) {
+            try {
+              await client.addMember(lg.id, m.entity_id, m.role);
+            } catch {
+              // Entity may not exist on core -- skip
+            }
+          }
+        } catch (e) {
+          console.error(`Cordelia: failed to push group ${lg.id} to node: ${(e as Error).message}`);
+        }
+      }
+    }
+
+    return { pulled, pushed };
   }
 
   /**

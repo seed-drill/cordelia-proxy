@@ -152,7 +152,25 @@ async function loadHotContext(userId: string): Promise<L1HotContext | null> {
 async function listUsers(): Promise<string[]> {
   try {
     const storage = getStorageProvider();
-    return await storage.listL1Users();
+    const allUsers = await storage.listL1Users();
+
+    // Filter out stub entries (created by FK-constraint code in group membership).
+    // A real user has at least an "identity" field in their L1 context.
+    const valid: string[] = [];
+    for (const userId of allUsers) {
+      try {
+        const buf = await storage.readL1(userId);
+        if (!buf) continue;
+        const raw = JSON.parse(buf.toString('utf-8'));
+        // Encrypted payloads are real users; stubs are plain `{}`
+        if (isEncryptedPayload(raw) || raw.identity) {
+          valid.push(userId);
+        }
+      } catch {
+        // Skip unreadable entries
+      }
+    }
+    return valid;
   } catch {
     return [];
   }
@@ -940,6 +958,18 @@ app.get('/api/l2/search', async (req: Request, res: Response) => {
 // =============================================================================
 
 /**
+ * Get node bridge (lazy import). Returns null if unavailable.
+ */
+async function getNodeBridgeIfAvailable() {
+  try {
+    const { getNodeBridge } = await import('./node-bridge.js');
+    const bridge = getNodeBridge();
+    if (await bridge.isAvailable()) return bridge;
+  } catch { /* node bridge not available */ }
+  return null;
+}
+
+/**
  * GET /api/groups - List all groups with members
  */
 app.get('/api/groups', async (_req: Request, res: Response) => {
@@ -1007,6 +1037,14 @@ app.post('/api/groups', async (req: Request, res: Response) => {
       await storage.addMember(id, entity_id, 'owner');
     }
 
+    // Push to core P2P node for replication (fire-and-forget)
+    const cultureStr = culture || '{"broadcast_eagerness":"moderate"}';
+    const secPolicyStr = security_policy || '{}';
+    getNodeBridgeIfAvailable().then(bridge => {
+      bridge?.pushCreateGroup(id, name, cultureStr, secPolicyStr, entity_id).catch(e =>
+        console.error(`Cordelia: node push (group create) failed: ${(e as Error).message}`));
+    });
+
     res.json({ success: true, group_id: id });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
@@ -1025,6 +1063,13 @@ app.delete('/api/groups/:id', async (req: Request, res: Response) => {
       res.status(404).json({ error: 'not_found', group_id: groupId });
       return;
     }
+
+    // Push to core P2P node (fire-and-forget)
+    getNodeBridgeIfAvailable().then(bridge => {
+      bridge?.pushDeleteGroup(groupId).catch(e =>
+        console.error(`Cordelia: node push (group delete) failed: ${(e as Error).message}`));
+    });
+
     res.json({ success: true, group_id: groupId });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
@@ -1050,7 +1095,15 @@ app.post('/api/groups/:id/members', async (req: Request, res: Response) => {
     if (!existing) {
       await storage.writeL1(entity_id, Buffer.from('{}'));
     }
-    await storage.addMember(groupId, entity_id, role || 'member');
+    const memberRole = role || 'member';
+    await storage.addMember(groupId, entity_id, memberRole);
+
+    // Push to core P2P node (fire-and-forget)
+    getNodeBridgeIfAvailable().then(bridge => {
+      bridge?.pushAddMember(groupId, entity_id, memberRole).catch(e =>
+        console.error(`Cordelia: node push (add member) failed: ${(e as Error).message}`));
+    });
+
     res.json({ success: true, group_id: groupId, entity_id });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
@@ -1070,6 +1123,13 @@ app.delete('/api/groups/:id/members/:entityId', async (req: Request, res: Respon
       res.status(404).json({ error: 'not_found', group_id: groupId, entity_id: entityId });
       return;
     }
+
+    // Push to core P2P node (fire-and-forget)
+    getNodeBridgeIfAvailable().then(bridge => {
+      bridge?.pushRemoveMember(groupId, entityId).catch(e =>
+        console.error(`Cordelia: node push (remove member) failed: ${(e as Error).message}`));
+    });
+
     res.json({ success: true, group_id: groupId, entity_id: entityId });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
@@ -1769,8 +1829,25 @@ export async function startServer(opts?: { port?: number; host?: string; memoryR
   await initEncryption();
 
   return new Promise((resolve) => {
-    const server = app.listen(port, host, () => {
+    const server = app.listen(port, host, async () => {
       console.log(`Cordelia HTTP API running on http://${host}:${port}`);
+
+      // Bidirectional group sync with core node (non-blocking)
+      if (storageProvider.name !== 'node') {
+        try {
+          const { getNodeBridge } = await import('./node-bridge.js');
+          const bridge = getNodeBridge();
+          if (await bridge.isAvailable()) {
+            const gs = await bridge.syncGroups(storageProvider);
+            if (gs.pulled > 0 || gs.pushed > 0) {
+              console.log(`Cordelia HTTP: group sync — pulled ${gs.pulled}, pushed ${gs.pushed}`);
+            }
+          }
+        } catch (e) {
+          console.error(`Cordelia HTTP: group sync failed (non-fatal): ${(e as Error).message}`);
+        }
+      }
+
       resolve(server);
     });
   });

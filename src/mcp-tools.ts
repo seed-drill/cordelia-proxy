@@ -607,6 +607,15 @@ async function handleMemoryGroupCreate(args: Record<string, unknown>): Promise<M
     await storage.createGroup(id, groupName, cultureStr, '{}');
     await storage.addMember(id, entity_id, 'owner');
     await storage.logAccess({ entity_id, action: 'create', resource_type: 'group', resource_id: id });
+
+    // Push to core P2P node for replication (fire-and-forget)
+    import('./node-bridge.js').then(async ({ getNodeBridge }) => {
+      const bridge = getNodeBridge();
+      if (await bridge.isAvailable()) {
+        await bridge.pushCreateGroup(id, groupName, cultureStr, '{}', entity_id);
+      }
+    }).catch(e => console.error(`Cordelia: node push (group create) failed: ${(e as Error).message}`));
+
     return jsonResponse({ success: true, id });
   } catch (e) {
     return jsonResponse({ error: (e as Error).message });
@@ -654,6 +663,15 @@ async function handleMemoryGroupAddMember(args: Record<string, unknown>): Promis
   try {
     await storage.addMember(group_id, target_entity_id, role);
     await storage.logAccess({ entity_id, action: 'add_member', resource_type: 'group', resource_id: group_id, detail: `added ${target_entity_id} as ${role}` });
+
+    // Push to core P2P node (fire-and-forget)
+    import('./node-bridge.js').then(async ({ getNodeBridge }) => {
+      const bridge = getNodeBridge();
+      if (await bridge.isAvailable()) {
+        await bridge.pushAddMember(group_id, target_entity_id, role);
+      }
+    }).catch(e => console.error(`Cordelia: node push (add member) failed: ${(e as Error).message}`));
+
     return jsonResponse({ success: true });
   } catch (e) {
     return jsonResponse({ error: (e as Error).message });
@@ -674,6 +692,14 @@ async function handleMemoryGroupRemoveMember(args: Record<string, unknown>): Pro
   const removed = await storage.removeMember(group_id, target_entity_id);
   if (removed) {
     await storage.logAccess({ entity_id, action: 'remove_member', resource_type: 'group', resource_id: group_id, detail: `removed ${target_entity_id}` });
+
+    // Push to core P2P node (fire-and-forget)
+    import('./node-bridge.js').then(async ({ getNodeBridge }) => {
+      const bridge = getNodeBridge();
+      if (await bridge.isAvailable()) {
+        await bridge.pushRemoveMember(group_id, target_entity_id);
+      }
+    }).catch(e => console.error(`Cordelia: node push (remove member) failed: ${(e as Error).message}`));
   }
   return jsonResponse({ success: removed });
 }
