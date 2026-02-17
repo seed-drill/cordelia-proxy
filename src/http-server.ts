@@ -628,15 +628,29 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
       if (m) addrMatches.push(m);
     }
 
-    // Get recent node logs for dial results (last 5 minutes)
-    // Strip ANSI escape codes since tracing output includes color sequences
+    // Get node logs since last boot for dial results
+    // Use _SYSTEMD_INVOCATION_ID to scope to current service invocation,
+    // so we see the initial connection even after 5+ minutes uptime.
+    // Strip ANSI escape codes since tracing output includes color sequences.
     const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
     let logLines: string[] = [];
     try {
-      const { stdout } = await execFileAsync('journalctl', [
-        '--user', '-u', 'cordelia-node', '--since', '5 min ago',
-        '--no-pager', '-o', 'cat',
-      ], { timeout: 5000 });
+      // Get the invocation ID of the current cordelia-node service
+      let invocationId = '';
+      try {
+        const { stdout: propOut } = await execFileAsync('systemctl', [
+          '--user', 'show', 'cordelia-node', '-p', 'InvocationID', '--value',
+        ], { timeout: 3000 });
+        invocationId = propOut.trim();
+      } catch { /* fall through to time-based */ }
+
+      const journalArgs = ['--user', '-u', 'cordelia-node', '--no-pager', '-o', 'cat'];
+      if (invocationId) {
+        journalArgs.push(`_SYSTEMD_INVOCATION_ID=${invocationId}`);
+      } else {
+        journalArgs.push('--since', '30 min ago');
+      }
+      const { stdout } = await execFileAsync('journalctl', journalArgs, { timeout: 5000 });
       logLines = stdout.split('\n').map(stripAnsi);
     } catch {
       // journalctl may not be available -- try log file fallback
