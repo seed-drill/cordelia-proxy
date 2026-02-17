@@ -692,8 +692,9 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
       }
 
       // Check node logs for connection outcome to this address
-      // Logs use two formats:
-      //   "connection established ... addr=/ip4/1.2.3.4/tcp/9474" (multiaddr)
+      // Logs use multiple formats across versions:
+      //   "connection established ... addr=/ip4/1.2.3.4/tcp/9474" (multiaddr, v0.1.0)
+      //   "connected to peer ... addr=1.2.3.4:9474" (host:port, v0.1.1+)
       //   "dial failed: timed out addr=1.2.3.4:9474" (host:port)
       const resolvedAddr = `${entry.ip}:${port}`;
       const multiAddr = `/ip4/${entry.ip}/tcp/${port}`;
@@ -705,7 +706,7 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
 
       for (let i = 0; i < logLines.length; i++) {
         const l = logLines[i];
-        if (l.includes('connection established') && (l.includes(multiAddr) || l.includes(resolvedAddr))) {
+        if ((l.includes('connection established') || l.includes('connected to peer')) && (l.includes(multiAddr) || l.includes(resolvedAddr))) {
           lastConnectedIdx = i;
         }
         if (l.includes('dial failed') && (l.includes(resolvedAddr) || l.includes(addr))) {
