@@ -311,7 +311,7 @@ function renderIdentity(identity) {
     .join('');
 
   const heroesHtml = (identity.heroes || [])
-    .map(hero => `<span class="tag hero">${escapeHtml(hero)}</span>`)
+    .map(hero => `<span class="tag hero-ref">${escapeHtml(hero)}</span>`)
     .join('');
 
   const interestsSection = identity.interests?.length
