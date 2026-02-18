@@ -442,6 +442,36 @@ app.post('/auth/logout', (req: Request, res: Response) => {
 // =============================================================================
 
 /**
+ * GET /api/env - Environment configuration (sensitive values masked)
+ */
+app.get('/api/env', (_req: Request, res: Response) => {
+  const mask = (v: string | undefined) => v ? '***' : undefined;
+  const envVars: Record<string, string | number | boolean | undefined> = {
+    CORDELIA_HTTP_PORT: PORT,
+    CORDELIA_HTTP_HOST: process.env.CORDELIA_HTTP_HOST,
+    CORDELIA_MEMORY_ROOT: MEMORY_ROOT,
+    CORDELIA_STORAGE: process.env.CORDELIA_STORAGE,
+    CORDELIA_CORE_API: CORDELIA_CORE_API,
+    CORDELIA_NODE_TOKEN: mask(process.env.CORDELIA_NODE_TOKEN),
+    CORDELIA_ENCRYPTION_KEY: mask(process.env.CORDELIA_ENCRYPTION_KEY),
+    CORDELIA_SESSION_SECRET: mask(process.env.CORDELIA_SESSION_SECRET),
+    CORDELIA_BASE_URL: process.env.CORDELIA_BASE_URL,
+    CORDELIA_LOCAL_USERS: LOCAL_USERS.size > 0 ? `${LOCAL_USERS.size} user(s)` : undefined,
+    CORDELIA_API_KEY: mask(process.env.CORDELIA_API_KEY),
+    CORDELIA_HOME: process.env.CORDELIA_HOME,
+    PORTAL_URL: PORTAL_URL,
+    GITHUB_CLIENT_ID: GITHUB_CLIENT_ID,
+    GITHUB_CLIENT_SECRET: mask(GITHUB_CLIENT_SECRET),
+    HONEYCOMB_API_KEY: mask(process.env.HONEYCOMB_API_KEY),
+    SENTRY_DSN: mask(process.env.SENTRY_DSN),
+    FLY_APP_NAME: process.env.FLY_APP_NAME,
+    NODE_ENV: process.env.NODE_ENV,
+    LOCAL_MODE: LOCAL_MODE,
+  };
+  res.json(envVars);
+});
+
+/**
  * GET /api/status - System status
  */
 app.get('/api/status', async (_req: Request, res: Response) => {
@@ -768,6 +798,185 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
   } catch (error) {
     const err = error as Error;
     res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Read config.toml, strip all [[network.bootnodes]] blocks, and rewrite
+ * with the supplied list. Uses atomic write (temp + rename) to avoid
+ * partial writes. Only touches the bootnodes section -- all other config
+ * (comments, formatting) is preserved.
+ */
+async function rewriteBootnodes(configPath: string, addrs: string[]): Promise<void> {
+  const fs = await import('fs/promises');
+  const nodePath = await import('path');
+
+  let text = await fs.readFile(configPath, 'utf-8');
+
+  // Strip existing [[network.bootnodes]] blocks (each is 2 lines: header + addr = "...")
+  text = text.replace(/\[\[network\.bootnodes\]\]\s*\naddr\s*=\s*"[^"]*"\s*\n?/g, '');
+
+  // Remove trailing blank lines before we append
+  text = text.trimEnd() + '\n';
+
+  // Append new bootnode blocks
+  for (const addr of addrs) {
+    text += `\n[[network.bootnodes]]\naddr = "${addr}"\n`;
+  }
+
+  // Atomic write: temp file then rename
+  const tmpPath = configPath + '.tmp';
+  await fs.writeFile(tmpPath, text, 'utf-8');
+  await fs.rename(tmpPath, configPath);
+}
+
+/**
+ * Extract bootnode addresses from config.toml text.
+ */
+function parseBootnodeAddrs(configText: string): string[] {
+  const sections = configText.split(/\[\[network\.bootnodes\]\]/g).slice(1);
+  const addrs: string[] = [];
+  for (const section of sections) {
+    const m = section.match(/addr\s*=\s*"([^"]+)"/);
+    if (m) addrs.push(m[1]);
+  }
+  return addrs;
+}
+
+/**
+ * POST /api/core/bootnodes - Add a bootnode
+ * Body: { addr: "host:port" }
+ * Appends a new [[network.bootnodes]] entry to config.toml.
+ * Does NOT auto-restart the node.
+ */
+app.post('/api/core/bootnodes', async (req: Request, res: Response) => {
+  try {
+    const { addr } = req.body;
+    if (!addr || typeof addr !== 'string') {
+      res.status(400).json({ error: 'addr is required (e.g. "host:port")' });
+      return;
+    }
+
+    // Validate host:port format
+    const parts = addr.split(':');
+    if (parts.length !== 2 || !parts[0] || isNaN(parseInt(parts[1], 10))) {
+      res.status(400).json({ error: 'Invalid addr format. Expected "host:port" with numeric port.' });
+      return;
+    }
+
+    const fs = await import('fs/promises');
+    const os = await import('os');
+    const nodePath = await import('path');
+    const configPath = nodePath.join(os.homedir(), '.cordelia', 'config.toml');
+
+    let configText: string;
+    try {
+      configText = await fs.readFile(configPath, 'utf-8');
+    } catch {
+      res.status(500).json({ error: 'config.toml not found' });
+      return;
+    }
+
+    const existing = parseBootnodeAddrs(configText);
+    if (existing.includes(addr)) {
+      res.status(409).json({ error: 'Bootnode already exists', bootnodes: existing });
+      return;
+    }
+
+    const updated = [...existing, addr];
+    await rewriteBootnodes(configPath, updated);
+
+    res.json({ success: true, bootnodes: updated, restart_required: true });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * DELETE /api/core/bootnodes/:addr - Remove a bootnode
+ * URL param addr is URL-encoded host:port.
+ */
+app.delete('/api/core/bootnodes/:addr', async (req: Request, res: Response) => {
+  try {
+    const addr = decodeURIComponent(req.params.addr as string);
+
+    const fs = await import('fs/promises');
+    const os = await import('os');
+    const nodePath = await import('path');
+    const configPath = nodePath.join(os.homedir(), '.cordelia', 'config.toml');
+
+    let configText: string;
+    try {
+      configText = await fs.readFile(configPath, 'utf-8');
+    } catch {
+      res.status(500).json({ error: 'config.toml not found' });
+      return;
+    }
+
+    const existing = parseBootnodeAddrs(configText);
+    if (!existing.includes(addr)) {
+      res.status(404).json({ error: 'Bootnode not found', bootnodes: existing });
+      return;
+    }
+
+    const updated = existing.filter(a => a !== addr);
+    await rewriteBootnodes(configPath, updated);
+
+    res.json({ success: true, bootnodes: updated, restart_required: true });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * POST /api/core/restart - Restart cordelia-node systemd service
+ * Waits up to 5s for the node to come back healthy.
+ */
+app.post('/api/core/restart', async (_req: Request, res: Response) => {
+  try {
+    const { execFile } = await import('child_process');
+    const { promisify } = await import('util');
+    const execFileAsync = promisify(execFile);
+
+    await execFileAsync('systemctl', ['--user', 'restart', 'cordelia-node'], { timeout: 10000 });
+
+    // Wait up to 5s for health check
+    let healthy = false;
+    let uptimeSecs = 0;
+    if (CORDELIA_CORE_API) {
+      const fs = await import('fs/promises');
+      const os = await import('os');
+      const nodePath = await import('path');
+      let bearerToken = process.env.CORDELIA_NODE_TOKEN || '';
+      if (!bearerToken) {
+        try {
+          bearerToken = (await fs.readFile(nodePath.join(os.homedir(), '.cordelia', 'node-token'), 'utf-8')).trim();
+        } catch { /* */ }
+      }
+
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        try {
+          const resp = await fetch(`${CORDELIA_CORE_API}/api/v1/status`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+            },
+          });
+          if (resp.ok) {
+            const data = await resp.json() as { uptime_secs?: number };
+            uptimeSecs = data.uptime_secs || 0;
+            healthy = true;
+            break;
+          }
+        } catch { /* node not ready yet */ }
+      }
+    }
+
+    res.json({ success: true, healthy, uptime_secs: uptimeSecs });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
   }
 });
 

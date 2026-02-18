@@ -297,6 +297,140 @@
       background: var(--color-copper);
       color: white;
     }
+
+    .bootnode-actions {
+      text-align: center;
+      width: 60px;
+    }
+
+    .btn-remove {
+      background: none;
+      border: 1px solid #c00;
+      color: #c00;
+      border-radius: 4px;
+      cursor: pointer;
+      padding: 0.2rem 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    .btn-remove:hover {
+      background: #c00;
+      color: white;
+    }
+
+    .bootnode-add-form {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 1rem;
+      align-items: center;
+    }
+
+    .bootnode-add-form input {
+      flex: 1;
+      padding: 0.4rem 0.6rem;
+      border: 1px solid var(--color-border);
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.85rem;
+    }
+
+    .btn-add {
+      padding: 0.4rem 1rem;
+      background: var(--color-deep-green);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    .btn-add:hover {
+      opacity: 0.9;
+    }
+
+    .bootnode-panel-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--color-border);
+    }
+
+    .btn-restart {
+      padding: 0.5rem 1.25rem;
+      background: var(--color-copper);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    .btn-restart:hover {
+      opacity: 0.9;
+    }
+
+    .btn-restart:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .restart-badge {
+      display: none;
+      background: var(--color-copper);
+      color: white;
+      padding: 0.2rem 0.6rem;
+      border-radius: 10px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    .restart-badge.visible {
+      display: inline-block;
+    }
+
+    .env-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+
+    .env-table td {
+      padding: 0.35rem 0.75rem;
+      border-bottom: 1px solid var(--color-border);
+      vertical-align: top;
+    }
+
+    .env-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .env-table .env-key {
+      font-family: 'Courier New', monospace;
+      font-weight: 600;
+      color: var(--color-charcoal);
+      white-space: nowrap;
+      width: 1%;
+    }
+
+    .env-table .env-val {
+      font-family: 'Courier New', monospace;
+      color: var(--color-deep-green);
+      word-break: break-all;
+    }
+
+    .env-table .env-val.unset {
+      color: var(--color-muted);
+      font-style: italic;
+    }
+
+    .env-table .env-val.masked {
+      color: var(--color-copper);
+    }
   </style>
 </head>
 <body>
@@ -364,19 +498,28 @@
 
       <!-- Bootnode Status -->
       <div class="peer-list-panel" id="bootnode-panel">
-        <h3>Bootnode Servers</h3>
+        <h3>Bootnode Servers <span class="restart-badge" id="restart-badge">Restart Required</span></h3>
         <table class="peers-table" id="bootnodes-table">
           <thead>
             <tr>
               <th>QUIC Status</th>
               <th>Address</th>
               <th>IP</th>
+              <th class="bootnode-actions"></th>
             </tr>
           </thead>
           <tbody id="bootnodes-tbody">
-            <tr><td colspan="3" class="no-peers">Checking...</td></tr>
+            <tr><td colspan="4" class="no-peers">Checking...</td></tr>
           </tbody>
         </table>
+        <div class="bootnode-add-form">
+          <input type="text" id="bootnode-addr-input" placeholder="host:port (e.g. boot3.example.com:9474)">
+          <button class="btn-add" onclick="addBootnode()">Add Bootnode</button>
+        </div>
+        <div class="bootnode-panel-footer">
+          <span id="bootnode-feedback" style="font-size:0.85rem; color:var(--color-muted);"></span>
+          <button class="btn-restart" id="restart-btn" onclick="restartNode()">Restart Node</button>
+        </div>
       </div>
 
       <!-- Peer List -->
@@ -394,6 +537,16 @@
           </thead>
           <tbody id="peers-tbody">
             <tr><td colspan="5" class="no-peers">No connected peers</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Environment Config -->
+      <div class="peer-list-panel" id="env-panel">
+        <h3>Environment</h3>
+        <table class="env-table">
+          <tbody id="env-tbody">
+            <tr><td colspan="2" class="no-peers">Loading...</td></tr>
           </tbody>
         </table>
       </div>
@@ -563,7 +716,10 @@
 
         // Update peer list table
         if (!data.peers || data.peers.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="5" class="no-peers">No connected peers</td></tr>';
+          const msg = data.total > 0
+            ? `${data.total} peer(s) connected (upgrade core node for details)`
+            : 'No connected peers';
+          tbody.innerHTML = `<tr><td colspan="5" class="no-peers">${msg}</td></tr>`;
           return;
         }
 
@@ -682,7 +838,7 @@
         const data = await response.json();
 
         if (!data.bootnodes || data.bootnodes.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="3" class="no-peers">No bootnodes configured</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="4" class="no-peers">No bootnodes configured</td></tr>';
           return;
         }
 
@@ -706,17 +862,149 @@
           }
 
           const errorTitle = node.error ? ` title="${escapeHtml(node.error)}"` : '';
+          const encodedAddr = encodeURIComponent(node.addr);
 
           tr.innerHTML = `
             <td><span class="bootnode-status ${statusClass}"${errorTitle}>${statusText}</span></td>
             <td class="monospace">${escapeHtml(node.addr)}</td>
             <td class="monospace">${escapeHtml(node.ip || '-')}</td>
+            <td class="bootnode-actions"><button class="btn-remove" onclick="removeBootnode('${encodedAddr}')" title="Remove bootnode">x</button></td>
           `;
           tbody.appendChild(tr);
         }
       } catch (error) {
         console.error('Bootnode status error:', error);
-        tbody.innerHTML = '<tr><td colspan="3" class="no-peers">Error checking bootnodes</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" class="no-peers">Error checking bootnodes</td></tr>';
+      }
+    }
+
+    function showRestartBadge() {
+      document.getElementById('restart-badge').classList.add('visible');
+    }
+
+    function setBootnodeFeedback(msg, isError) {
+      const el = document.getElementById('bootnode-feedback');
+      el.textContent = msg;
+      el.style.color = isError ? '#c00' : 'var(--color-deep-green)';
+      if (msg) setTimeout(() => { el.textContent = ''; }, 5000);
+    }
+
+    async function addBootnode() {
+      const input = document.getElementById('bootnode-addr-input');
+      const addr = input.value.trim();
+      if (!addr) return;
+
+      try {
+        const resp = await fetch(`${API_BASE}/api/core/bootnodes`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ addr }),
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          setBootnodeFeedback(data.error || 'Failed to add bootnode', true);
+          return;
+        }
+
+        input.value = '';
+        showRestartBadge();
+        setBootnodeFeedback(`Added ${addr}`, false);
+        loadBootnodeStatus();
+      } catch (error) {
+        setBootnodeFeedback('Network error', true);
+      }
+    }
+
+    async function removeBootnode(encodedAddr) {
+      const addr = decodeURIComponent(encodedAddr);
+      if (!confirm(`Remove bootnode ${addr}?`)) return;
+
+      try {
+        const resp = await fetch(`${API_BASE}/api/core/bootnodes/${encodedAddr}`, {
+          method: 'DELETE',
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          setBootnodeFeedback(data.error || 'Failed to remove bootnode', true);
+          return;
+        }
+
+        showRestartBadge();
+        setBootnodeFeedback(`Removed ${addr}`, false);
+        loadBootnodeStatus();
+      } catch (error) {
+        setBootnodeFeedback('Network error', true);
+      }
+    }
+
+    async function restartNode() {
+      if (!confirm('Restart cordelia-node? This will briefly disconnect peers.')) return;
+
+      const btn = document.getElementById('restart-btn');
+      btn.disabled = true;
+      btn.textContent = 'Restarting...';
+      setBootnodeFeedback('', false);
+
+      try {
+        const resp = await fetch(`${API_BASE}/api/core/restart`, {
+          method: 'POST',
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          setBootnodeFeedback(data.error || 'Restart failed', true);
+          return;
+        }
+
+        document.getElementById('restart-badge').classList.remove('visible');
+
+        if (data.healthy) {
+          setBootnodeFeedback('Node restarted successfully', false);
+        } else {
+          setBootnodeFeedback('Node restarted but health check pending', true);
+        }
+
+        // Refresh all status panels
+        setTimeout(() => {
+          loadCoreStatus();
+          loadPeerList();
+          loadBootnodeStatus();
+        }, 1000);
+      } catch (error) {
+        setBootnodeFeedback('Network error during restart', true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Restart Node';
+      }
+    }
+
+    async function loadEnvConfig() {
+      const tbody = document.getElementById('env-tbody');
+      try {
+        const resp = await fetch(`${API_BASE}/api/env`);
+        const data = await resp.json();
+        tbody.innerHTML = '';
+        for (const [key, val] of Object.entries(data)) {
+          const tr = document.createElement('tr');
+          let valClass = 'env-val';
+          let display;
+          if (val === undefined || val === null) {
+            valClass += ' unset';
+            display = 'not set';
+          } else if (val === '***') {
+            valClass += ' masked';
+            display = '***';
+          } else {
+            display = String(val);
+          }
+          tr.innerHTML = `<td class="env-key">${escapeHtml(key)}</td><td class="${valClass}">${escapeHtml(display)}</td>`;
+          tbody.appendChild(tr);
+        }
+      } catch (error) {
+        console.error('Env config error:', error);
+        tbody.innerHTML = '<tr><td colspan="2" class="no-peers">Error loading env</td></tr>';
       }
     }
 
@@ -737,6 +1025,7 @@
       loadCoreStatus();
       loadPeerList();
       loadBootnodeStatus();
+      loadEnvConfig();
 
       // Refresh status every 30 seconds
       setInterval(loadCoreStatus, 30000);
