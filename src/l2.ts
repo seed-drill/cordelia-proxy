@@ -1697,3 +1697,157 @@ export async function rebuildIndex(options?: { reencrypt?: boolean }): Promise<{
   }
   return result;
 }
+
+// ====================================================================
+// Index Reconciliation (cordelia-proxy#12)
+//
+// When CORDELIA_STORAGE=node, items arriving via P2P replication bypass
+// the proxy's FTS5/vec indexes. This function queries the node for
+// group items and indexes any that are missing from local search.
+// ====================================================================
+
+let _lastReconcileAt: string | null = null;
+let _reconcileTimer: ReturnType<typeof setInterval> | null = null;
+
+const RECONCILE_INTERVAL_MS = 60_000; // 1 minute
+const RECONCILE_BATCH_LIMIT = 500;
+
+export async function reconcileNodeIndex(): Promise<{ reconciled: number; errors: number; skipped: number }> {
+  const storage = getStorageProvider();
+  if (storage.name !== 'node') return { reconciled: 0, errors: 0, skipped: 0 };
+
+  const { resolveNodeConfig } = await import('./storage.js');
+  const { NodeClient } = await import('./node-client.js');
+  const { url, token } = await resolveNodeConfig();
+  const client = new NodeClient({ baseUrl: url, token, timeoutMs: 10_000 });
+
+  // Get all groups from the node
+  const groups = await client.listGroups();
+
+  // Load current blob index to check what's already indexed
+  const index = await loadIndex();
+  const indexedIds = new Set(index.entries.map(e => e.id));
+
+  let reconciled = 0;
+  let errors = 0;
+  let skipped = 0;
+
+  for (const group of groups) {
+    let headers;
+    try {
+      headers = await client.listGroupItems(
+        group.id,
+        _lastReconcileAt ?? undefined,
+        RECONCILE_BATCH_LIMIT,
+      );
+    } catch {
+      errors++;
+      continue;
+    }
+
+    for (const header of headers) {
+      if (header.is_deletion) { skipped++; continue; }
+      if (indexedIds.has(header.item_id)) { skipped++; continue; }
+
+      try {
+        // Read full item (NodeStorageProvider -> node HTTP)
+        const stored = await storage.readL2Item(header.item_id);
+        if (!stored) { skipped++; continue; }
+
+        // Decrypt
+        let parsed = JSON.parse(stored.data.toString('utf-8'));
+        if (isEncryptedPayload(parsed)) {
+          parsed = await decryptPayload(parsed, storage, header.item_id);
+        }
+
+        // Validate
+        const type = header.item_type as L2ItemType;
+        const validated = validateItem(type, parsed);
+        if (!validated) { skipped++; continue; }
+
+        // Extract indexing metadata
+        const name = extractName(type, validated);
+        const tags = (validated as { tags?: string[] }).tags || [];
+        const lowerTags = tags.map(t => t.toLowerCase());
+        const keywordSources = buildKeywordSources(validated, name);
+
+        // Generate embedding
+        let embedding: number[] | undefined;
+        const provider = getDefaultProvider();
+        if (provider.dimensions() > 0) {
+          const embeddableText = buildEmbeddableText(validated, name, tags);
+          embedding = await getCachedEmbedding(embeddableText, provider) ?? undefined;
+        }
+
+        // Get metadata for domain/visibility
+        const meta = await storage.readL2ItemMeta(header.item_id);
+        const domain: MemoryDomain = (meta?.domain as MemoryDomain) || inferDomainFromType(type);
+
+        let subtype: string | undefined;
+        if (type === 'entity') subtype = (validated as L2Entity).type;
+        else if (type === 'learning') subtype = (validated as L2Learning).type;
+
+        // Add to blob index
+        index.entries.push({
+          id: header.item_id,
+          type,
+          subtype,
+          name,
+          tags: lowerTags,
+          keywords: extractKeywords(keywordSources),
+          path: `${type === 'entity' ? 'entities' : type === 'session' ? 'sessions' : 'learnings'}/${header.item_id}.json`,
+          embedding,
+          visibility: meta?.group_id ? 'group' : 'private',
+          domain,
+        });
+
+        // FTS5
+        await storage.ftsUpsert(header.item_id, name, keywordSources, lowerTags.join(' '));
+
+        // sqlite-vec
+        if (embedding && storage.vecAvailable()) {
+          await storage.vecUpsert(header.item_id, toFloat32Array(embedding));
+        }
+
+        indexedIds.add(header.item_id);
+        reconciled++;
+      } catch (e) {
+        console.error(`Cordelia: reconcile item ${header.item_id}: ${(e as Error).message}`);
+        errors++;
+      }
+    }
+  }
+
+  if (reconciled > 0) {
+    await saveIndex(index);
+  }
+
+  _lastReconcileAt = new Date().toISOString();
+  return { reconciled, errors, skipped };
+}
+
+/**
+ * Start periodic index reconciliation for node storage.
+ * Returns cleanup function to stop the timer.
+ */
+export function startReconcileTimer(): () => void {
+  if (_reconcileTimer) return () => {};
+
+  _reconcileTimer = setInterval(async () => {
+    try {
+      const result = await reconcileNodeIndex();
+      if (result.reconciled > 0) {
+        console.log(`Cordelia: reconciled ${result.reconciled} items (${result.errors} errors)`);
+      }
+    } catch (e) {
+      console.error(`Cordelia: reconcile error: ${(e as Error).message}`);
+    }
+  }, RECONCILE_INTERVAL_MS);
+
+  return () => {
+    if (_reconcileTimer) {
+      clearInterval(_reconcileTimer);
+      _reconcileTimer = null;
+    }
+  };
+}

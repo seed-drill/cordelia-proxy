@@ -761,6 +761,15 @@ async function handleMemoryBackfillEmbeddings(): Promise<McpToolResponse> {
   }
 }
 
+async function handleMemoryReconcile(): Promise<McpToolResponse> {
+  try {
+    const result = await l2.reconcileNodeIndex();
+    return jsonResponse({ success: true, ...result });
+  } catch (e) {
+    return jsonResponse({ error: (e as Error).message });
+  }
+}
+
 async function handleMemoryPrefetchL2(args: Record<string, unknown>): Promise<McpToolResponse> {
   const { user_id, cwd, limit: prefetchLimit = 10 } = args as {
     user_id: string;
@@ -806,6 +815,7 @@ const toolHandlers: Record<string, ToolHandler> = {
   memory_bind_context: handleMemoryBindContext,
   memory_unbind_context: handleMemoryUnbindContext,
   memory_backfill_embeddings: handleMemoryBackfillEmbeddings,
+  memory_reconcile: handleMemoryReconcile,
   memory_prefetch_l2: handleMemoryPrefetchL2,
 };
 
@@ -1142,6 +1152,15 @@ export function registerCordeliaTools(server: Server): void {
         name: 'memory_backfill_embeddings',
         description:
           'Rebuild FTS and vec indexes from L2 items. Rebuilds FTS keyword index (includes details field) and vec embeddings. Uses cached embeddings where available, generates new ones via Ollama.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {},
+        },
+      },
+      {
+        name: 'memory_reconcile',
+        description:
+          'Reconcile search index with node storage. Indexes replicated items that arrived via P2P but are missing from local FTS5/vec search. Runs automatically on startup and every 60s, but can be triggered manually.',
         inputSchema: {
           type: 'object' as const,
           properties: {},

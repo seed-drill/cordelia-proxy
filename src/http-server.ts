@@ -2072,6 +2072,20 @@ export async function startServer(opts?: { port?: number; host?: string; memoryR
         }
       }
 
+      // Index reconciliation: sync node items into local FTS5/vec (cordelia-proxy#12)
+      if (storageProvider.name === 'node') {
+        try {
+          const { reconcileNodeIndex, startReconcileTimer } = await import('./l2.js');
+          const result = await reconcileNodeIndex();
+          if (result.reconciled > 0) {
+            console.log(`Cordelia HTTP: reconciled ${result.reconciled} items into search index`);
+          }
+          startReconcileTimer();
+        } catch (e) {
+          console.error(`Cordelia HTTP: index reconciliation failed (non-fatal): ${(e as Error).message}`);
+        }
+      }
+
       resolve(server);
     });
   });

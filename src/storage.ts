@@ -181,7 +181,7 @@ function parseTOML(text: string): Record<string, Record<string, string>> {
 /**
  * Resolve node URL and token from config.toml and file fallbacks.
  */
-async function resolveNodeConfig(): Promise<{ url: string; token: string }> {
+export async function resolveNodeConfig(): Promise<{ url: string; token: string }> {
   let url = process.env.CORDELIA_NODE_URL || '';
   let token = process.env.CORDELIA_NODE_TOKEN || '';
 
