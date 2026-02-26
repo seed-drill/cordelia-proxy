@@ -262,8 +262,10 @@ async function writeHotContext(
   const storage = getStorageProvider();
   await storage.writeL1(userId, Buffer.from(fileContent, 'utf-8'));
 
-  // Replicate L1 as an L2 item in the personal group for durable/replicated storage
-  const personalGroupId = `personal-${userId}`;
+  // Replicate L1 as an L2 item in the personal group for durable/replicated storage.
+  // Personal group UUID comes from config.toml (R5 design -- opaque UUID, not derived from userId).
+  const { getPersonalGroup } = await import('./storage.js');
+  const personalGroupId = await getPersonalGroup();
   l2.writeItem('entity', {
     id: `l1-hot-${userId}`,
     type: 'concept',

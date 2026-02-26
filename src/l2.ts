@@ -954,8 +954,11 @@ export async function writeItem(
     return { error: `validation_failed: ${(e as Error).message}` };
   }
 
-  // Default to personal group when no group_id specified
-  const effectiveGroupId = options.group_id || (options.entity_id ? `personal-${options.entity_id}` : undefined);
+  // Default to personal group when no group_id specified.
+  // Personal group UUID is read from config.toml (R5 design).
+  const { getPersonalGroup } = await import('./storage.js');
+  const personalGroup = await getPersonalGroup();
+  const effectiveGroupId = options.group_id || personalGroup;
 
   // Determine file path (still used for index entry)
   let subdir: string;

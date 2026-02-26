@@ -245,3 +245,27 @@ export async function initStorageProvider(memoryRoot: string): Promise<StoragePr
   activeProvider = provider;
   return provider;
 }
+
+/**
+ * Read the personal group UUID from config.toml.
+ * Returns undefined if not configured.
+ */
+let _personalGroupCache: string | undefined | null = null;
+
+export async function getPersonalGroup(): Promise<string | undefined> {
+  if (_personalGroupCache !== null) {
+    return _personalGroupCache || undefined;
+  }
+  try {
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    const os = await import('os');
+    const configPath = path.join(os.homedir(), '.cordelia', 'config.toml');
+    const content = await fs.readFile(configPath, 'utf-8');
+    const config = parseTOML(content);
+    _personalGroupCache = config.node?.personal_group || '';
+  } catch {
+    _personalGroupCache = '';
+  }
+  return _personalGroupCache || undefined;
+}

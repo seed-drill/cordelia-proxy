@@ -5,6 +5,10 @@
  * The HTTP server runs as a persistent sidecar across Claude Code sessions.
  * Hooks call ensureServer() which health-checks or spawns the sidecar.
  *
+ * The local Cordelia node (managed by launchd) MUST be running. The proxy
+ * always uses CORDELIA_STORAGE=node. There is no sqlite fallback -- all
+ * writes flow through the P2P node for replication.
+ *
  * PID file: ~/.cordelia/http-server.pid
  * Log file: ~/.cordelia/http-server.log
  */
@@ -20,6 +24,8 @@ const DEFAULT_PORT = 3847;
 const HEALTH_TIMEOUT_MS = 3000;
 const STARTUP_POLL_MS = 200;
 const STARTUP_MAX_WAIT_MS = 5000;
+const NODE_WAIT_MS = 10000;
+const NODE_POLL_MS = 500;
 
 /**
  * Get the base URL for the local HTTP server.
@@ -60,7 +66,54 @@ async function getRunningPid() {
 }
 
 /**
+ * Read node URL from config.toml and token from node-token file.
+ */
+async function readNodeConfig() {
+  const configPath = path.join(CORDELIA_HOME, 'config.toml');
+  const configContent = await fs.readFile(configPath, 'utf-8');
+  const addrMatch = configContent.match(/api_addr\s*=\s*"([^"]+)"/);
+  const transportMatch = configContent.match(/api_transport\s*=\s*"([^"]+)"/);
+  if (!addrMatch) {
+    throw new Error('No api_addr in ~/.cordelia/config.toml');
+  }
+
+  const proto = transportMatch?.[1] === 'https' ? 'https' : 'http';
+  const nodeUrl = `${proto}://${addrMatch[1]}`;
+
+  const tokenPath = path.join(CORDELIA_HOME, 'node-token');
+  const nodeToken = (await fs.readFile(tokenPath, 'utf-8')).trim();
+  if (!nodeToken) {
+    throw new Error('Empty ~/.cordelia/node-token');
+  }
+
+  return { nodeUrl, nodeToken };
+}
+
+/**
+ * Wait for the local Cordelia node to respond. The node is managed by launchd
+ * and auto-restarts, so a brief wait covers cold-boot and restart scenarios.
+ */
+async function waitForNode(nodeUrl, nodeToken) {
+  const start = Date.now();
+  while (Date.now() - start < NODE_WAIT_MS) {
+    try {
+      const resp = await fetch(`${nodeUrl}/api/v1/status`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${nodeToken}` },
+        signal: AbortSignal.timeout(2000),
+      });
+      if (resp.ok) return true;
+    } catch {
+      // Node not ready yet
+    }
+    await new Promise(r => setTimeout(r, NODE_POLL_MS));
+  }
+  return false;
+}
+
+/**
  * Spawn the HTTP server as a detached background process.
+ * Requires the local Cordelia node to be running.
  */
 async function spawnServer(passphrase, memoryRoot) {
   await fs.mkdir(CORDELIA_HOME, { recursive: true });
@@ -71,17 +124,35 @@ async function spawnServer(passphrase, memoryRoot) {
     '..', 'dist', 'http-server.js'
   );
 
+  // Read node config (fails if config.toml or node-token missing)
+  const { nodeUrl, nodeToken } = await readNodeConfig();
+
+  // Wait for the node to be reachable (launchd may still be starting it)
+  const nodeReady = await waitForNode(nodeUrl, nodeToken);
+  if (!nodeReady) {
+    throw new Error(
+      `Cordelia node not responding at ${nodeUrl} after ${NODE_WAIT_MS / 1000}s. ` +
+      'Check: launchctl list | grep cordelia'
+    );
+  }
+
   const logFd = await fs.open(LOG_FILE, 'a');
 
   const env = {
     ...process.env,
     CORDELIA_HTTP_PORT: String(DEFAULT_PORT),
     CORDELIA_MEMORY_ROOT: memoryRoot,
-    CORDELIA_STORAGE: process.env.CORDELIA_STORAGE || 'sqlite',
+    CORDELIA_STORAGE: 'node',
+    CORDELIA_NODE_URL: nodeUrl,
+    CORDELIA_CORE_API: nodeUrl,
+    CORDELIA_NODE_TOKEN: nodeToken,
   };
   if (passphrase) {
     env.CORDELIA_ENCRYPTION_KEY = passphrase;
   }
+
+  const logMsg = `[${new Date().toISOString()}] Starting proxy: storage=node (${nodeUrl})\n`;
+  await fs.appendFile(LOG_FILE, logMsg);
 
   const child = spawn('node', [serverScript, '--local'], {
     detached: true,
@@ -105,6 +176,8 @@ async function spawnServer(passphrase, memoryRoot) {
  * 1. Health check existing server
  * 2. If not healthy, check PID file for stale process
  * 3. If no server, spawn one and poll until healthy
+ *
+ * Precondition: local Cordelia node must be running (launchd service).
  */
 export async function ensureServer(passphrase, memoryRoot) {
   const port = DEFAULT_PORT;
@@ -123,7 +196,7 @@ export async function ensureServer(passphrase, memoryRoot) {
     try { await fs.unlink(PID_FILE); } catch { /* ignore */ }
   }
 
-  // Spawn new server
+  // Spawn new server (requires node to be running)
   const pid = await spawnServer(passphrase, memoryRoot);
 
   // Poll for readiness
