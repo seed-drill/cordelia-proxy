@@ -809,7 +809,6 @@ app.get('/api/core/bootnodes', async (_req: Request, res: Response) => {
  */
 async function rewriteBootnodes(configPath: string, addrs: string[]): Promise<void> {
   const fs = await import('fs/promises');
-  const nodePath = await import('path');
 
   let text = await fs.readFile(configPath, 'utf-8');
 
