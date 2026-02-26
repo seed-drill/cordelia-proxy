@@ -1699,7 +1699,7 @@ function validatePortalUrl(portalUrl: string | undefined, envPortalUrl: string |
 }
 
 type PollResult =
-  | { authorized: true; accessToken: string; entityId: string; deviceId: string }
+  | { authorized: true; accessToken: string; entityId: string; deviceId: string; cordeliaKey?: string; cordeliaSalt?: string }
   | { authorized: false; error?: { status: number; body: { error: string; detail: string } } };
 
 const POLL_ERROR_MAP: Record<string, { status: number; error: string; detail: string }> = {
@@ -1738,6 +1738,8 @@ async function pollForAuthorization(
       entity_id?: string;
       device_id?: string;
       interval?: number;
+      cordelia_key?: string;
+      cordelia_salt?: string;
     };
 
     if (pollData.status === 'authorization_pending') {
@@ -1751,6 +1753,8 @@ async function pollForAuthorization(
         accessToken: pollData.access_token || '',
         entityId: pollData.entity_id || '',
         deviceId: pollData.device_id || '',
+        cordeliaKey: pollData.cordelia_key,
+        cordeliaSalt: pollData.cordelia_salt,
       };
     }
 
@@ -1861,17 +1865,35 @@ app.post('/api/enroll', async (req: Request, res: Response) => {
       return;
     }
 
-    const { accessToken, entityId, deviceId: portalDeviceId } = pollResult;
+    const { accessToken, entityId, deviceId: portalDeviceId, cordeliaKey, cordeliaSalt } = pollResult;
     // Use device_id from portal (source of truth); fall back to local generation
     const deviceId = portalDeviceId || `device-${crypto.randomBytes(8).toString('hex')}`;
     await registerDeviceWithNode(accessToken, entityId, deviceId);
     await storeEnrollmentTokens(accessToken, entityId);
+
+    // Store canonical encryption key + salt from portal vault
+    let keyDistributed = false;
+    if (cordeliaKey && cordeliaSalt) {
+      try {
+        const { storeEncryptionKey, storeCanonicalSalt, reinitCrypto, getConfig: getCryptoConfig } = await import('./crypto.js');
+        await storeEncryptionKey(cordeliaKey);
+        const memRoot = process.env.CORDELIA_MEMORY_ROOT || `${(await import('os')).homedir()}/.cordelia/memory`;
+        const cryptoConfig = getCryptoConfig(memRoot);
+        await storeCanonicalSalt(cordeliaSalt, cryptoConfig.saltDir);
+        await reinitCrypto(memRoot);
+        keyDistributed = true;
+        console.log('Cordelia: encryption key and salt received from portal vault');
+      } catch (err) {
+        console.error('Cordelia: failed to store encryption key from enrollment:', (err as Error).message);
+      }
+    }
 
     res.json({
       status: 'enrolled',
       device_id: deviceId,
       entity_id: entityId,
       portal_url: portalBase,
+      key_distributed: keyDistributed,
     });
   } catch (error) {
     console.error('Enrollment error:', (error as Error).message);

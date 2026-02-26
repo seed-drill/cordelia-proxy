@@ -282,3 +282,60 @@ export async function initCrypto(passphrase: string, salt: Buffer): Promise<Cryp
 export function resetCryptoProvider(): void {
   defaultProvider = null;
 }
+
+/**
+ * Store encryption key in platform keychain (preferred) or file fallback.
+ * Updates existing entries if present.
+ */
+export async function storeEncryptionKey(keyHex: string): Promise<void> {
+  if (os.platform() === 'darwin') {
+    try {
+      // -U flag updates if exists, adds if not
+      execSync(
+        `security add-generic-password -a cordelia -s cordelia-encryption-key -w "${keyHex}" -U`,
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      return;
+    } catch {
+      // Keychain failed, fall through to file
+    }
+  } else if (os.platform() === 'linux') {
+    try {
+      execSync(
+        'secret-tool store --label "Cordelia Encryption Key" service cordelia type encryption-key',
+        { input: keyHex, stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      return;
+    } catch {
+      // secret-tool failed, fall through to file
+    }
+  }
+
+  // File fallback
+  const keyPath = path.join(os.homedir(), '.cordelia', 'key');
+  await fs.mkdir(path.dirname(keyPath), { recursive: true });
+  await fs.writeFile(keyPath, keyHex, { mode: 0o600 });
+}
+
+/**
+ * Replace the auto-generated salt with a canonical one from the portal vault.
+ */
+export async function storeCanonicalSalt(saltHex: string, saltDir: string): Promise<void> {
+  const saltPath = path.join(saltDir, 'global.salt');
+  const salt = Buffer.from(saltHex, 'hex');
+  await fs.mkdir(saltDir, { recursive: true });
+  await fs.writeFile(saltPath, salt);
+}
+
+/**
+ * Re-initialize the crypto provider with the current key and salt.
+ * Call after storing new key/salt from enrollment.
+ */
+export async function reinitCrypto(memoryRoot: string): Promise<CryptoProvider | null> {
+  const passphrase = await resolveEncryptionKey();
+  if (!passphrase) return null;
+
+  const config = getConfig(memoryRoot);
+  const salt = await loadOrCreateSalt(config.saltDir, 'global');
+  return initCrypto(passphrase, salt);
+}
