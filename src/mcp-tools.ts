@@ -20,7 +20,6 @@ import * as l2 from './l2.js';
 import {
   getDefaultCryptoProvider,
   isEncryptedPayload,
-  type EncryptedPayload,
 } from './crypto.js';
 import { getStorageProvider } from './storage.js';
 import { computeContentHash, computeChainHash } from './integrity.js';
@@ -124,7 +123,7 @@ async function loadHotContext(
       return null;
     }
 
-    let parsed = JSON.parse(buffer.toString('utf-8'));
+    const parsed = JSON.parse(buffer.toString('utf-8'));
 
     if (isEncryptedPayload(parsed)) {
       throw new Error('Legacy scrypt-encrypted L1 context found. Run migrate:v2 to convert.');

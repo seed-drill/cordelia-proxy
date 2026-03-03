@@ -5,7 +5,7 @@
  * idempotent re-run, items already at v2 skipped.
  */
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as crypto from 'crypto';
 import * as path from 'path';

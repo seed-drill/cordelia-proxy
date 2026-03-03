@@ -236,7 +236,7 @@ export async function loadIndex(): Promise<L2Index> {
       return { version: 1, updated_at: new Date().toISOString(), entries: [] };
     }
 
-    let parsed = JSON.parse(buffer.toString('utf-8'));
+    const parsed = JSON.parse(buffer.toString('utf-8'));
 
     // Legacy scrypt-encrypted indexes can no longer be read (E5)
     if (isEncryptedPayload(parsed)) {
@@ -1639,7 +1639,7 @@ async function scanDirectoryForIndex(
  * Populates blob index, FTS5, and vec tables.
  * Optionally re-encrypts unencrypted items if crypto is enabled.
  */
-export async function rebuildIndex(options?: { reencrypt?: boolean }): Promise<{ success: true; count: number; encrypted?: number } | { error: string }> {
+export async function rebuildIndex(_options?: { reencrypt?: boolean }): Promise<{ success: true; count: number; encrypted?: number } | { error: string }> {
   const entries: L2IndexEntry[] = [];
   const subdirs: Array<{ dir: string; type: L2ItemType }> = [
     { dir: 'entities', type: 'entity' },
