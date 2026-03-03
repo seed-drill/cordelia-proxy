@@ -106,8 +106,14 @@ export class NodeStorageProvider implements StorageProvider {
     if (await this.useNode()) {
       try {
         return await this.client.deleteL1(userId);
-      } catch {
-        this._nodeAvailable = false;
+      } catch (e) {
+        // Only fall back to local on connection errors (status 0 = unreachable).
+        // If the node responded with an error, propagate it.
+        if (e instanceof NodeClientError && e.status === 0) {
+          this._nodeAvailable = false;
+        } else {
+          throw e;
+        }
       }
     }
     return this.local.deleteL1(userId);

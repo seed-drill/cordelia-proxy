@@ -225,7 +225,15 @@ export async function resolveNodeConfig(): Promise<{ url: string; token: string 
 }
 
 export async function initStorageProvider(memoryRoot: string): Promise<StorageProvider> {
-  const storageType = process.env.CORDELIA_STORAGE || 'sqlite';
+  let storageType = process.env.CORDELIA_STORAGE || '';
+
+  // Auto-detect node from config.toml when CORDELIA_STORAGE is not explicitly set.
+  // This ensures both MCP server and HTTP sidecar use node storage consistently
+  // without requiring the env var to be set in every launch context.
+  if (!storageType) {
+    const { token } = await resolveNodeConfig();
+    storageType = token ? 'node' : 'sqlite';
+  }
 
   let provider: StorageProvider;
 
