@@ -73,7 +73,7 @@ describe('Group key sync helpers', () => {
     // Cleanup
     const os = await import('os');
     await fs.unlink(
-      path.join(os.homedir(), '.cordelia', 'group-keys', `${groupId}.key`),
+      path.join(os.homedir(), '.cordelia', 'group-keys', `${groupId}.json`),
     ).catch(() => {});
     clearGroupKeyCache();
   });
@@ -98,7 +98,62 @@ describe('Group key sync helpers', () => {
     // Cleanup
     const os = await import('os');
     await fs.unlink(
-      path.join(os.homedir(), '.cordelia', 'group-keys', `${groupId}.key`),
+      path.join(os.homedir(), '.cordelia', 'group-keys', `${groupId}.json`),
+    ).catch(() => {});
+    clearGroupKeyCache();
+  });
+
+  it('sync picks up new key versions after rotation', async () => {
+    const groupId = `sync-rotate-${Date.now()}`;
+    const pskV1 = crypto.randomBytes(32);
+    const pskV2 = crypto.randomBytes(32);
+
+    // Store v1 locally (simulating initial enrollment)
+    await storeGroupKey(groupId, pskV1, 1);
+
+    // Verify v1 exists
+    const existingV1 = await getGroupKey(groupId, 1);
+    assert.ok(existingV1);
+    assert.deepEqual(existingV1, pskV1);
+
+    // Simulate what sync does: check if specific version exists
+    const existingV2 = await getGroupKey(groupId, 2);
+    assert.equal(existingV2, null, 'v2 should not exist yet');
+
+    // Simulate sync storing v2 after rotation
+    await storeGroupKey(groupId, pskV2, 2);
+
+    // Both versions should be available
+    const storedV1 = await getGroupKey(groupId, 1);
+    const storedV2 = await getGroupKey(groupId, 2);
+    assert.ok(storedV1);
+    assert.ok(storedV2);
+    assert.deepEqual(storedV1, pskV1);
+    assert.deepEqual(storedV2, pskV2);
+
+    // Latest should be v2
+    const latest = await getGroupKey(groupId);
+    assert.deepEqual(latest, pskV2);
+
+    // Encrypt with v1, decrypt with v1 (key ring backward compat)
+    const plaintext = Buffer.from('written with v1');
+    const encrypted = await groupEncrypt(plaintext, storedV1);
+    const decrypted = await groupDecrypt(encrypted, storedV1);
+    assert.deepEqual(decrypted, plaintext);
+
+    // Encrypt with v2, decrypt with v2
+    const plaintext2 = Buffer.from('written with v2');
+    const encrypted2 = await groupEncrypt(plaintext2, storedV2);
+    const decrypted2 = await groupDecrypt(encrypted2, storedV2);
+    assert.deepEqual(decrypted2, plaintext2);
+
+    // Cross-version: v1 cannot decrypt v2 ciphertext
+    await assert.rejects(() => groupDecrypt(encrypted2, storedV1));
+
+    // Cleanup
+    const os = await import('os');
+    await fs.unlink(
+      path.join(os.homedir(), '.cordelia', 'group-keys', `${groupId}.json`),
     ).catch(() => {});
     clearGroupKeyCache();
   });
@@ -147,7 +202,7 @@ describe('Group key sync helpers', () => {
     const os = await import('os');
     for (const g of groups) {
       await fs.unlink(
-        path.join(os.homedir(), '.cordelia', 'group-keys', `${g.id}.key`),
+        path.join(os.homedir(), '.cordelia', 'group-keys', `${g.id}.json`),
       ).catch(() => {});
     }
     clearGroupKeyCache();

@@ -7,7 +7,7 @@
  * Sync flow:
  * 1. Read entity-id and portal-token from ~/.cordelia/
  * 2. GET /api/vault/group-keys/{entityId} from portal (bearer auth)
- * 3. For each group key not already stored locally:
+ * 3. For each group key version not already stored locally:
  *    a. Decrypt envelope using local X25519 private key
  *    b. Store PSK to ~/.cordelia/group-keys/{groupId}.key
  * 4. Repeat on interval (default 5 minutes)
@@ -17,7 +17,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { getLocalX25519Keypair, envelopeDecrypt } from './envelope.js';
-import { storeGroupKey, getGroupKey } from './group-keys.js';
+import { storeGroupKey, getGroupKey, clearGroupKeyCache } from './group-keys.js';
 import type { EnvelopeCiphertext } from './envelope.js';
 
 const CORDELIA_HOME = process.env.CORDELIA_HOME || path.join(os.homedir(), '.cordelia');
@@ -130,8 +130,8 @@ export async function syncGroupKeysFromVault(): Promise<{
   }
 
   for (const gk of data.group_keys) {
-    // Skip if already stored locally
-    const existing = await getGroupKey(gk.group_id);
+    // Skip if this specific version already stored locally
+    const existing = await getGroupKey(gk.group_id, gk.key_version);
     if (existing) {
       result.skipped++;
       continue;
@@ -146,12 +146,17 @@ export async function syncGroupKeysFromVault(): Promise<{
       };
 
       const psk = envelopeDecrypt(envelope, keypair.privateKey);
-      await storeGroupKey(gk.group_id, psk);
+      await storeGroupKey(gk.group_id, psk, gk.key_version);
       result.synced++;
     } catch (err) {
       console.error(`Cordelia group-key-sync: failed to decrypt key for group ${gk.group_id}:`, (err as Error).message);
       result.errors++;
     }
+  }
+
+  // Clear in-memory cache so freshly synced versions are picked up on next read
+  if (result.synced > 0) {
+    clearGroupKeyCache();
   }
 
   // Zero private key after use
