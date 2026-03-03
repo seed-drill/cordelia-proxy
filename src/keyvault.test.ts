@@ -21,7 +21,10 @@ describe('GroupKeyVault', () => {
   before(async () => {
     // Override GROUP_KEYS_DIR for tests by writing directly
     await fs.mkdir(groupKeysDir, { recursive: true });
-    await fs.writeFile(path.join(groupKeysDir, `${testGroupId}.key`), testPsk, { mode: 0o600 });
+    await fs.writeFile(path.join(groupKeysDir, `${testGroupId}.json`), JSON.stringify({
+      versions: { '1': testPsk.toString('hex') },
+      latest: 1,
+    }), { mode: 0o600 });
     clearGroupKeyCache();
   });
 
@@ -42,13 +45,16 @@ describe('GroupKeyVault', () => {
     );
   });
 
-  it('should return newVersion 1 from rotateGroupKey (stub)', async () => {
+  it('should reject rotateGroupKey without portal credentials', async () => {
     const vault = new GroupKeyVault();
-    const result = await vault.rotateGroupKey('test-group');
-    assert.strictEqual(result.newVersion, 1);
+    // Without PORTAL_URL env var, rotation should fail with credential error
+    await assert.rejects(
+      () => vault.rotateGroupKey('test-group', 'test-passphrase'),
+      /Cannot rotate.*portal credentials/,
+    );
   });
 
-  it('should return count 0 from reencryptItems (stub)', async () => {
+  it('should return count 0 from reencryptItems (deferred)', async () => {
     const vault = new GroupKeyVault();
     const result = await vault.reencryptItems('test-group', 1);
     assert.strictEqual(result.count, 0);
