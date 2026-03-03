@@ -5,7 +5,7 @@
  * version ordering, encrypt with latest, decrypt with old version.
  */
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'fs/promises';
 import * as path from 'path';

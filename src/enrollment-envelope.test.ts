@@ -15,7 +15,7 @@ import { storeGroupKey, getGroupKey, clearGroupKeyCache, groupEncrypt, groupDecr
 import { GroupKeyVault } from './keyvault.js';
 
 describe('storeGroupKey', () => {
-  const testDir = `/tmp/cordelia-test-store-gk-${Date.now()}`;
+  const _testDir = `/tmp/cordelia-test-store-gk-${Date.now()}`;
 
   before(async () => {
     // We'll write keys here -- the module uses ~/.cordelia/group-keys/ by default,
@@ -141,7 +141,7 @@ describe('Envelope decrypt -> store group key flow', () => {
   });
 
   it('cross-device: same PSK encrypts/decrypts on different devices', async () => {
-    const groupId = `test-cross-${Date.now()}`;
+    const _groupId = `test-cross-${Date.now()}`;
     clearGroupKeyCache();
 
     const psk = crypto.randomBytes(32);
@@ -174,7 +174,7 @@ describe('Envelope decrypt -> store group key flow', () => {
 
 describe('writePersonalGroupToConfig', () => {
   const testConfigDir = `/tmp/cordelia-test-config-${Date.now()}`;
-  const testConfigPath = path.join(testConfigDir, 'config.toml');
+  const _testConfigPath = path.join(testConfigDir, 'config.toml');
 
   before(async () => {
     await fs.mkdir(testConfigDir, { recursive: true });

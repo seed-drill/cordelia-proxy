@@ -8,7 +8,7 @@
  * Rotation and re-encryption are stubs until E4 (key lifecycle sprint).
  */
 
-import { getGroupKey, storeGroupKey } from './group-keys.js';
+import { getGroupKey } from './group-keys.js';
 
 export interface KeyVault {
   getGroupKey(groupId: string, version?: number): Promise<Buffer>;

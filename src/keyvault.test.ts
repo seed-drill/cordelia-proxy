@@ -10,7 +10,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { GroupKeyVault } from './keyvault.js';
-import { storeGroupKey, clearGroupKeyCache } from './group-keys.js';
+import { clearGroupKeyCache } from './group-keys.js';
 
 describe('GroupKeyVault', () => {
   const testDir = `/tmp/cordelia-test-keyvault-${Date.now()}`;
