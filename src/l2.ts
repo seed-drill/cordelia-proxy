@@ -238,14 +238,9 @@ export async function loadIndex(): Promise<L2Index> {
 
     let parsed = JSON.parse(buffer.toString('utf-8'));
 
-    // Handle encrypted index
+    // Legacy scrypt-encrypted indexes can no longer be read (E5)
     if (isEncryptedPayload(parsed)) {
-      const cryptoProvider = getDefaultCryptoProvider();
-      if (!cryptoProvider.isUnlocked()) {
-        throw new Error('Cannot read encrypted L2 index: encryption not configured');
-      }
-      const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
-      parsed = JSON.parse(decrypted.toString('utf-8'));
+      throw new Error('Legacy scrypt-encrypted L2 index found. Run migrate:v2 to convert.');
     }
 
     return L2IndexSchema.parse(parsed);
@@ -280,17 +275,7 @@ export async function saveIndex(index: L2Index): Promise<void> {
     updated_at: new Date().toISOString(),
   });
 
-  // Encrypt index if crypto provider is unlocked
-  const cryptoProvider = getDefaultCryptoProvider();
-  let fileContent: string;
-
-  if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
-    const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
-    const encrypted = await cryptoProvider.encrypt(plaintext);
-    fileContent = JSON.stringify(encrypted, null, 2);
-  } else {
-    fileContent = JSON.stringify(validated, null, 2);
-  }
+  const fileContent = JSON.stringify(validated, null, 2);
 
   const storage = getStorageProvider();
   await storage.writeL2Index(Buffer.from(fileContent, 'utf-8'));
@@ -691,9 +676,9 @@ async function decryptPayload(
   id: string,
 ): Promise<unknown> {
   const itemMeta = await storage.readL2ItemMeta(id);
-  if (itemMeta?.key_version === 2 && itemMeta.group_id) {
+  if (itemMeta?.group_id) {
     const { getGroupKey, groupDecrypt } = await import('./group-keys.js');
-    const groupKey = await getGroupKey(itemMeta.group_id);
+    const groupKey = await getGroupKey(itemMeta.group_id, itemMeta.key_version ?? undefined);
     if (groupKey) {
       const decrypted = await groupDecrypt(parsed as EncryptedPayload, groupKey);
       return JSON.parse(decrypted.toString('utf-8'));
@@ -701,12 +686,7 @@ async function decryptPayload(
     throw new Error(`Cannot read group item: no PSK for group ${itemMeta.group_id}`);
   }
 
-  const cryptoProvider = getDefaultCryptoProvider();
-  if (!cryptoProvider.isUnlocked()) {
-    throw new Error('Cannot read encrypted item: encryption not configured');
-  }
-  const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
-  return JSON.parse(decrypted.toString('utf-8'));
+  throw new Error('Cannot read encrypted item: no group_id metadata (legacy scrypt items must be migrated via migrate:v2)');
 }
 
 /**
@@ -995,7 +975,7 @@ export async function writeItem(
     visibility: effectiveGroupId ? 'group' : 'private',
     group_id: effectiveGroupId,
     author_id: options.entity_id,
-    key_version: effectiveGroupId ? 2 : 1,
+    key_version: 2,
     domain,
     ttl_expires_at: ttlExpires,
   };
@@ -1088,26 +1068,35 @@ async function checkSharePolicy(
 async function reencryptForGroup(
   originalData: Buffer,
   targetGroup: string,
+  sourceGroup?: string,
 ): Promise<{ data: Buffer; keyVersion: number } | { error: string }> {
   let plainData: Buffer;
   const parsed = JSON.parse(originalData.toString('utf-8'));
   if (isEncryptedPayload(parsed)) {
-    const cryptoProvider = getDefaultCryptoProvider();
-    if (!cryptoProvider.isUnlocked()) {
-      return { error: 'encryption_locked' };
+    if (!sourceGroup) {
+      return { error: 'cannot_decrypt_source' };
     }
-    plainData = await cryptoProvider.decrypt(parsed as EncryptedPayload);
+    const { getGroupKey: getGK, groupDecrypt: gDecrypt } = await import('./group-keys.js');
+    const srcKey = await getGK(sourceGroup);
+    if (!srcKey) {
+      return { error: 'cannot_decrypt_source' };
+    }
+    try {
+      plainData = await gDecrypt(parsed as EncryptedPayload, srcKey);
+    } catch {
+      return { error: 'cannot_decrypt_source' };
+    }
   } else {
     plainData = originalData;
   }
 
   const { getGroupKey, groupEncrypt } = await import('./group-keys.js');
   const groupKey = await getGroupKey(targetGroup);
-  if (groupKey) {
-    const encrypted = await groupEncrypt(plainData, groupKey);
-    return { data: Buffer.from(JSON.stringify(encrypted, null, 2), 'utf-8'), keyVersion: 2 };
+  if (!groupKey) {
+    return { error: 'no_group_key' };
   }
-  return { data: plainData, keyVersion: 1 };
+  const encrypted = await groupEncrypt(plainData, groupKey);
+  return { data: Buffer.from(JSON.stringify(encrypted, null, 2), 'utf-8'), keyVersion: 2 };
 }
 
 /**
@@ -1139,7 +1128,7 @@ export async function shareItem(
   }
 
   // Decrypt and re-encrypt for group
-  const reencrypted = await reencryptForGroup(original.data, targetGroup);
+  const reencrypted = await reencryptForGroup(original.data, targetGroup, meta.group_id || undefined);
   if ('error' in reencrypted) {
     return reencrypted;
   }
@@ -1554,22 +1543,16 @@ async function processFileForIndex(
   file: string,
   type: L2ItemType,
   dir: string,
-  cryptoProvider: ReturnType<typeof getDefaultCryptoProvider>,
-  shouldEncrypt: boolean,
+  _cryptoProvider: ReturnType<typeof getDefaultCryptoProvider>,
+  _shouldEncrypt: boolean,
   storage: ReturnType<typeof getStorageProvider>,
 ): Promise<{ entry: L2IndexEntry; encrypted: boolean } | null> {
   const content = await fs.readFile(filePath, 'utf-8');
-  let parsed = JSON.parse(content);
-  let wasEncrypted = false;
+  const parsed = JSON.parse(content);
 
-  // Handle encrypted items
+  // Skip legacy scrypt-encrypted items (run migrate:v2 to convert)
   if (isEncryptedPayload(parsed)) {
-    if (!cryptoProvider.isUnlocked()) {
-      return null;
-    }
-    const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
-    parsed = JSON.parse(decrypted.toString('utf-8'));
-    wasEncrypted = true;
+    return null;
   }
 
   // Validate and extract metadata
@@ -1583,14 +1566,7 @@ async function processFileForIndex(
     subtype = (validated as L2Learning).type;
   }
 
-  // Re-encrypt unencrypted items if requested
-  let didEncrypt = false;
-  if (shouldEncrypt && !wasEncrypted) {
-    const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
-    const encrypted = await cryptoProvider.encrypt(plaintext);
-    await fs.writeFile(filePath, JSON.stringify(encrypted, null, 2), 'utf-8');
-    didEncrypt = true;
-  }
+  const didEncrypt = false;
 
   const name = extractName(type, validated);
   const tags = (validated as { tags?: string[] }).tags || [];
@@ -1671,7 +1647,7 @@ export async function rebuildIndex(options?: { reencrypt?: boolean }): Promise<{
     { dir: 'learnings', type: 'learning' },
   ];
   const cryptoProvider = getDefaultCryptoProvider();
-  const shouldEncrypt = options?.reencrypt && cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none';
+  const shouldEncrypt = false; // Legacy scrypt re-encryption removed (E5)
   let encryptedCount = 0;
   const storage = getStorageProvider();
 

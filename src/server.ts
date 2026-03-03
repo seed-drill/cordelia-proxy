@@ -9,13 +9,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as path from 'path';
-import { registerCordeliaTools, setEncryptionEnabled } from './mcp-tools.js';
-import {
-  getConfig as getCryptoConfig,
-  loadOrCreateSalt,
-  initCrypto,
-  resolveEncryptionKey,
-} from './crypto.js';
+import { registerCordeliaTools } from './mcp-tools.js';
 import { initStorageProvider } from './storage.js';
 import type { SqliteStorageProvider } from './storage-sqlite.js';
 import { InlinePolicyEngine, setPolicyEngine } from './policy.js';
@@ -40,24 +34,6 @@ const server = new Server(
 
 registerCordeliaTools(server);
 
-async function initEncryption(): Promise<void> {
-  const passphrase = await resolveEncryptionKey();
-  const config = getCryptoConfig(MEMORY_ROOT);
-
-  if (!passphrase) {
-    console.error('Cordelia: Encryption disabled (no key found via env/keychain/file)');
-    return;
-  }
-
-  try {
-    const salt = await loadOrCreateSalt(config.saltDir, 'global');
-    await initCrypto(passphrase, salt);
-    setEncryptionEnabled(true);
-    console.error('Cordelia: Encryption enabled (AES-256-GCM)');
-  } catch (error) {
-    console.error('Cordelia: Failed to initialize encryption:', (error as Error).message);
-  }
-}
 
 async function checkAndBackfillSqlite(sqliteProvider: SqliteStorageProvider): Promise<void> {
   const vecOk = sqliteProvider.vecAvailable();
@@ -94,9 +70,6 @@ async function main(): Promise<void> {
   // Initialize storage provider
   const storageProvider = await initStorageProvider(MEMORY_ROOT);
   console.error(`Cordelia: Storage provider: ${storageProvider.name}`);
-
-  // Initialize encryption if configured
-  await initEncryption();
 
   // Startup health checks + index integrity
   if (storageProvider.name === 'sqlite') {

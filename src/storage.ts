@@ -269,3 +269,11 @@ export async function getPersonalGroup(): Promise<string | undefined> {
   }
   return _personalGroupCache || undefined;
 }
+
+/**
+ * Reset the personal group cache. Call after enrollment writes a new
+ * personal_group to config.toml so subsequent reads pick up the new value.
+ */
+export function resetPersonalGroupCache(): void {
+  _personalGroupCache = null;
+}

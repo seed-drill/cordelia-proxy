@@ -10,7 +10,6 @@
 
 import * as path from 'path';
 import { initStorageProvider } from './storage.js';
-import { getConfig as getCryptoConfig, loadOrCreateSalt, initCrypto } from './crypto.js';
 import { backfillDomains } from './l2.js';
 import type { SqliteStorageProvider } from './storage-sqlite.js';
 
@@ -20,17 +19,6 @@ const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT
 async function main(): Promise<void> {
   console.log('Cordelia: Domain Backfill');
   console.log('='.repeat(40));
-
-  // Init crypto
-  const passphrase = process.env.CORDELIA_ENCRYPTION_KEY;
-  const config = getCryptoConfig(MEMORY_ROOT);
-  if (config.enabled && passphrase) {
-    const salt = await loadOrCreateSalt(config.saltDir, 'global');
-    await initCrypto(passphrase, salt);
-    console.log('Crypto: initialized (AES-256-GCM)');
-  } else {
-    console.log('WARNING: Encryption not initialized - encrypted items will error');
-  }
 
   // Init storage
   const provider = await initStorageProvider(MEMORY_ROOT);

@@ -12,25 +12,12 @@
 import * as path from 'path';
 import { initStorageProvider } from './storage.js';
 import { rebuildIndex, loadIndex } from './l2.js';
-import { getConfig as getCryptoConfig, loadOrCreateSalt, initCrypto } from './crypto.js';
 
 const MEMORY_ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory');
 
 async function main(): Promise<void> {
   console.log('Cordelia: L2 Index Rebuild');
   console.log('='.repeat(40));
-
-  // Initialize encryption (same as server.ts)
-  const passphrase = process.env.CORDELIA_ENCRYPTION_KEY;
-  const config = getCryptoConfig(MEMORY_ROOT);
-
-  if (config.enabled && passphrase) {
-    const salt = await loadOrCreateSalt(config.saltDir, 'global');
-    await initCrypto(passphrase, salt);
-    console.log('Encryption initialized (AES-256-GCM)');
-  } else {
-    console.log('WARNING: Encryption not initialized - encrypted items will be skipped');
-  }
 
   // Initialize storage provider (respects CORDELIA_STORAGE env var)
   const provider = await initStorageProvider(MEMORY_ROOT);

@@ -30,10 +30,6 @@ import { L1HotContextSchema, type L1HotContext } from './schema.js';
 import * as l2 from './l2.js';
 import { createSignupHandler, getGenesisHTML } from '@seed-drill/rutherford';
 import {
-  getConfig as getCryptoConfig,
-  loadOrCreateSalt,
-  initCrypto,
-  resolveEncryptionKey,
   getDefaultCryptoProvider,
   isEncryptedPayload,
   type EncryptedPayload,
@@ -1699,7 +1695,7 @@ function validatePortalUrl(portalUrl: string | undefined, envPortalUrl: string |
 }
 
 type PollResult =
-  | { authorized: true; accessToken: string; entityId: string; deviceId: string; cordeliaKey?: string; cordeliaSalt?: string }
+  | { authorized: true; accessToken: string; entityId: string; deviceId: string; envelopeEncryptedPsk?: string; personalGroupId?: string }
   | { authorized: false; error?: { status: number; body: { error: string; detail: string } } };
 
 const POLL_ERROR_MAP: Record<string, { status: number; error: string; detail: string }> = {
@@ -1718,11 +1714,17 @@ async function pollForAuthorization(
   pollUrl: string,
   pollIntervalMs: number,
   maxDurationMs: number,
+  x25519PubHex?: string,
 ): Promise<PollResult> {
   const startTime = Date.now();
 
+  // Append X25519 public key as query param so portal can envelope-encrypt PSK
+  const effectivePollUrl = x25519PubHex
+    ? `${pollUrl}${pollUrl.includes('?') ? '&' : '?'}x25519_pub=${x25519PubHex}`
+    : pollUrl;
+
   while ((Date.now() - startTime) < maxDurationMs) {
-    const pollResp = await fetch(pollUrl);
+    const pollResp = await fetch(effectivePollUrl);
 
     if (!pollResp.ok) {
       const errBody = await pollResp.json().catch(() => ({ error: 'unknown' })) as { error?: string; detail?: string };
@@ -1738,8 +1740,8 @@ async function pollForAuthorization(
       entity_id?: string;
       device_id?: string;
       interval?: number;
-      cordelia_key?: string;
-      cordelia_salt?: string;
+      envelope_encrypted_psk?: string;
+      personal_group_id?: string;
     };
 
     if (pollData.status === 'authorization_pending') {
@@ -1753,8 +1755,8 @@ async function pollForAuthorization(
         accessToken: pollData.access_token || '',
         entityId: pollData.entity_id || '',
         deviceId: pollData.device_id || '',
-        cordeliaKey: pollData.cordelia_key,
-        cordeliaSalt: pollData.cordelia_salt,
+        envelopeEncryptedPsk: pollData.envelope_encrypted_psk,
+        personalGroupId: pollData.personal_group_id,
       };
     }
 
@@ -1809,6 +1811,45 @@ async function registerDeviceWithNode(accessToken: string, entityId: string, dev
   return deviceId;
 }
 
+/**
+ * Write personal_group to config.toml [node] section.
+ * Creates or updates the entry. Preserves existing content.
+ */
+async function writePersonalGroupToConfig(personalGroupId: string): Promise<void> {
+  const fsLib = await import('fs/promises');
+  const osLib = await import('os');
+  const pathLib = await import('path');
+  const configPath = pathLib.join(osLib.homedir(), '.cordelia', 'config.toml');
+
+  let content = '';
+  try {
+    content = await fsLib.readFile(configPath, 'utf-8');
+  } catch {
+    // File doesn't exist yet -- create minimal config
+  }
+
+  // Check if personal_group already set in [node] section
+  const pgRegex = /^personal_group\s*=.*$/m;
+  if (content.includes('[node]')) {
+    if (pgRegex.test(content)) {
+      // Update existing entry
+      content = content.replace(pgRegex, `personal_group = "${personalGroupId}"`);
+    } else {
+      // Append to [node] section
+      content = content.replace(
+        /(\[node\][^\[]*)/,
+        `$1personal_group = "${personalGroupId}"\n`,
+      );
+    }
+  } else {
+    // No [node] section -- append one
+    content += `\n[node]\npersonal_group = "${personalGroupId}"\n`;
+  }
+
+  await fsLib.mkdir(pathLib.dirname(configPath), { recursive: true });
+  await fsLib.writeFile(configPath, content, { mode: 0o600 });
+}
+
 async function storeEnrollmentTokens(accessToken: string, entityId: string): Promise<void> {
   try {
     const fs = await import('fs/promises');
@@ -1854,7 +1895,17 @@ app.post('/api/enroll', async (req: Request, res: Response) => {
   const safePollUrl = new URL(`/api/enroll/poll-user/${encodeURIComponent(formattedCode)}`, portalBase); // NOSONAR: formattedCode is validated as ^[A-Z0-9]{4}-[A-Z0-9]{4}$
 
   try {
-    const pollResult = await pollForAuthorization(safePollUrl.href, 5_000, 15 * 60 * 1000);
+    // Derive local X25519 public key so portal can envelope-encrypt PSK for this device
+    let x25519PubHex: string | undefined;
+    try {
+      const { getLocalX25519Keypair } = await import('./envelope.js');
+      const kp = await getLocalX25519Keypair();
+      x25519PubHex = kp.publicKey.toString('hex');
+    } catch (err) {
+      console.warn('Cordelia: could not derive X25519 key for enrollment (legacy path):', (err as Error).message);
+    }
+
+    const pollResult = await pollForAuthorization(safePollUrl.href, 5_000, 15 * 60 * 1000, x25519PubHex);
 
     if (!pollResult.authorized) {
       if (pollResult.error) {
@@ -1865,27 +1916,47 @@ app.post('/api/enroll', async (req: Request, res: Response) => {
       return;
     }
 
-    const { accessToken, entityId, deviceId: portalDeviceId, cordeliaKey, cordeliaSalt } = pollResult;
+    const { accessToken, entityId, deviceId: portalDeviceId, envelopeEncryptedPsk, personalGroupId } = pollResult;
     // Use device_id from portal (source of truth); fall back to local generation
     const deviceId = portalDeviceId || `device-${crypto.randomBytes(8).toString('hex')}`;
     await registerDeviceWithNode(accessToken, entityId, deviceId);
     await storeEnrollmentTokens(accessToken, entityId);
 
-    // Store canonical encryption key + salt from portal vault
-    let keyDistributed = false;
-    if (cordeliaKey && cordeliaSalt) {
+    // E2b envelope PSK distribution: decrypt envelope and store group key
+    let envelopeDistributed = false;
+    if (envelopeEncryptedPsk && personalGroupId && x25519PubHex) {
       try {
-        const { storeEncryptionKey, storeCanonicalSalt, reinitCrypto, getConfig: getCryptoConfig } = await import('./crypto.js');
-        await storeEncryptionKey(cordeliaKey);
-        const memRoot = process.env.CORDELIA_MEMORY_ROOT || `${(await import('os')).homedir()}/.cordelia/memory`;
-        const cryptoConfig = getCryptoConfig(memRoot);
-        await storeCanonicalSalt(cordeliaSalt, cryptoConfig.saltDir);
-        await reinitCrypto(memRoot);
-        keyDistributed = true;
-        console.log('Cordelia: encryption key and salt received from portal vault');
+        const { getLocalX25519Keypair, envelopeDecrypt } = await import('./envelope.js');
+        const { storeGroupKey } = await import('./group-keys.js');
+
+        // Decrypt envelope-encrypted PSK using local X25519 private key
+        const kp = await getLocalX25519Keypair();
+        const envelope = JSON.parse(envelopeEncryptedPsk);
+        const psk = envelopeDecrypt(envelope, kp.privateKey);
+
+        // Zero private key after use
+        kp.privateKey.fill(0);
+
+        // Store PSK to disk at ~/.cordelia/group-keys/{personalGroupId}.key
+        await storeGroupKey(personalGroupId, psk);
+
+        // Write personal_group_id to config.toml
+        await writePersonalGroupToConfig(personalGroupId);
+
+        // Reset personal group cache so L2 writes pick up the new group
+        const { resetPersonalGroupCache } = await import('./storage.js');
+        resetPersonalGroupCache();
+
+        envelopeDistributed = true;
+        console.log(`Cordelia: envelope PSK stored for personal group ${personalGroupId}`);
       } catch (err) {
-        console.error('Cordelia: failed to store encryption key from enrollment:', (err as Error).message);
+        console.error('Cordelia: failed to process envelope PSK from enrollment:', (err as Error).message);
       }
+    }
+
+    // Trigger group key sync to pick up any shared group keys (fire-and-forget)
+    if (envelopeDistributed) {
+      import('./group-key-sync.js').then(m => m.syncGroupKeysFromVault()).catch(() => {});
     }
 
     res.json({
@@ -1893,7 +1964,9 @@ app.post('/api/enroll', async (req: Request, res: Response) => {
       device_id: deviceId,
       entity_id: entityId,
       portal_url: portalBase,
-      key_distributed: keyDistributed,
+      key_distributed: envelopeDistributed,
+      envelope_distributed: envelopeDistributed,
+      personal_group_id: personalGroupId,
     });
   } catch (error) {
     console.error('Enrollment error:', (error as Error).message);
@@ -2041,24 +2114,6 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 // Server Startup
 // =============================================================================
 
-async function initEncryption(): Promise<void> {
-  const passphrase = await resolveEncryptionKey();
-  const config = getCryptoConfig(MEMORY_ROOT);
-
-  if (!passphrase) {
-    console.log('Cordelia HTTP: Encryption disabled (no key found via env/keychain/file)');
-    return;
-  }
-
-  try {
-    const salt = await loadOrCreateSalt(config.saltDir, 'global');
-    await initCrypto(passphrase, salt);
-    console.log('Cordelia HTTP: Encryption enabled (AES-256-GCM)');
-  } catch (error) {
-    console.error('Cordelia HTTP: Failed to initialize encryption:', (error as Error).message);
-  }
-}
-
 /**
  * Start the server on the given port/host. Returns the HTTP server instance.
  * Exported for test use - tests can start/stop the server programmatically.
@@ -2070,8 +2125,6 @@ export async function startServer(opts?: { port?: number; host?: string; memoryR
 
   const storageProvider = await initStorageProvider(memRoot);
   console.log(`Cordelia HTTP: Storage provider: ${storageProvider.name}`);
-
-  await initEncryption();
 
   return new Promise((resolve) => {
     const server = app.listen(port, host, async () => {
@@ -2105,6 +2158,14 @@ export async function startServer(opts?: { port?: number; host?: string; memoryR
         } catch (e) {
           console.error(`Cordelia HTTP: index reconciliation failed (non-fatal): ${(e as Error).message}`);
         }
+      }
+
+      // Start periodic group key sync from portal vault (E3b)
+      try {
+        const { startGroupKeySync } = await import('./group-key-sync.js');
+        startGroupKeySync();
+      } catch (e) {
+        console.error(`Cordelia HTTP: group key sync start failed (non-fatal): ${(e as Error).message}`);
       }
 
       resolve(server);

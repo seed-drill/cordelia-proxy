@@ -403,7 +403,7 @@ export class NodeBridge {
   /**
    * Pull new group items from the P2P network and index locally.
    * For each group, queries the node for items updated since last sync.
-   * Decrypts group PSK items (key_version=2), skips proxy-key items (key_version=1).
+   * Decrypts group PSK items. Non-encrypted items pass through as-is.
    */
   async syncGroupItems(
     groupIds: string[],

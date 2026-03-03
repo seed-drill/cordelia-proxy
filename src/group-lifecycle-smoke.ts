@@ -14,7 +14,6 @@
 
 import * as path from 'path';
 import { initStorageProvider } from './storage.js';
-import { getConfig as getCryptoConfig, loadOrCreateSalt, initCrypto } from './crypto.js';
 import { writeItem, deleteItem } from './l2.js';
 import type { SqliteStorageProvider } from './storage-sqlite.js';
 
@@ -32,18 +31,6 @@ function assert(condition: boolean, label: string, detail?: string): void {
   } else {
     console.log(`  FAIL: ${label}${detail ? ' -- ' + detail : ''}`);
     failed++;
-  }
-}
-
-async function initCryptoIfEnabled(): Promise<void> {
-  const passphrase = process.env.CORDELIA_ENCRYPTION_KEY;
-  const config = getCryptoConfig(MEMORY_ROOT);
-  if (config.enabled && passphrase) {
-    const salt = await loadOrCreateSalt(config.saltDir, 'global');
-    await initCrypto(passphrase, salt);
-    console.log('Crypto: initialized');
-  } else {
-    console.log('WARNING: no encryption key');
   }
 }
 
@@ -133,7 +120,7 @@ async function main(): Promise<void> {
   console.log('Cordelia: Group Lifecycle Smoke Test');
   console.log('='.repeat(50));
 
-  await initCryptoIfEnabled();
+  // Encryption now uses per-group PSKs (no scrypt init needed)
 
   const provider = await initStorageProvider(MEMORY_ROOT);
   console.log(`Storage: ${provider.name}`);

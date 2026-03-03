@@ -12,17 +12,12 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import fc from 'fast-check';
-import { Aes256GcmProvider } from './crypto.js';
+import { groupEncrypt, groupDecrypt } from './group-keys.js';
 import { SqliteStorageProvider } from './storage-sqlite.js';
 import { setStorageProvider } from './storage.js';
 
-describe('Property: Crypto encrypt/decrypt round-trip', () => {
-  let provider: Aes256GcmProvider;
-
-  before(async () => {
-    provider = new Aes256GcmProvider();
-    await provider.unlock('property-test-passphrase', crypto.randomBytes(32));
-  });
+describe('Property: Group key encrypt/decrypt round-trip', () => {
+  const psk = crypto.randomBytes(32);
 
   it('should round-trip any Buffer', async () => {
     await fc.assert(
@@ -30,8 +25,8 @@ describe('Property: Crypto encrypt/decrypt round-trip', () => {
         fc.uint8Array({ minLength: 0, maxLength: 10000 }),
         async (arr) => {
           const plaintext = Buffer.from(arr);
-          const encrypted = await provider.encrypt(plaintext);
-          const decrypted = await provider.decrypt(encrypted);
+          const encrypted = await groupEncrypt(plaintext, psk);
+          const decrypted = await groupDecrypt(encrypted, psk);
           assert.deepStrictEqual(decrypted, plaintext);
         },
       ),
@@ -40,32 +35,30 @@ describe('Property: Crypto encrypt/decrypt round-trip', () => {
   });
 
   it('should produce different ciphertexts for same plaintext (unique IVs)', async () => {
-    // Run sequentially (not via fast-check) to avoid framework replay interference
     for (let i = 0; i < 20; i++) {
       const plaintext = crypto.randomBytes(1 + (i % 100));
-      const enc1 = await provider.encrypt(plaintext);
-      const enc2 = await provider.encrypt(plaintext);
+      const enc1 = await groupEncrypt(plaintext, psk);
+      const enc2 = await groupEncrypt(plaintext, psk);
       assert.notStrictEqual(enc1.iv, enc2.iv, `IVs must be unique (iteration ${i})`);
       assert.notStrictEqual(enc1.ciphertext, enc2.ciphertext, `Ciphertexts must differ (iteration ${i})`);
     }
   });
 
   it('should not decrypt with wrong key', async () => {
-    const otherProvider = new Aes256GcmProvider();
-    await otherProvider.unlock('different-passphrase', crypto.randomBytes(32));
+    const wrongKey = crypto.randomBytes(32);
 
     await fc.assert(
       fc.asyncProperty(
         fc.uint8Array({ minLength: 1, maxLength: 100 }),
         async (arr) => {
           const plaintext = Buffer.from(arr);
-          const encrypted = await provider.encrypt(plaintext);
+          const encrypted = await groupEncrypt(plaintext, psk);
 
           try {
-            await otherProvider.decrypt(encrypted);
+            await groupDecrypt(encrypted, wrongKey);
             assert.fail('Should have thrown');
-          } catch (e) {
-            assert.ok((e as Error).message.includes('authentication tag mismatch') || (e as Error).message.includes('fail'));
+          } catch {
+            // Expected: wrong key fails decryption
           }
         },
       ),

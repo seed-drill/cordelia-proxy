@@ -1,11 +1,14 @@
 /**
- * Project Cordelia - KeyVault Interface + R2 Stub
+ * Project Cordelia - KeyVault Interface + GroupKeyVault
  *
- * Interface designed for R3 envelope encryption (Signal pattern).
- * R2 stub: shared key, no real envelope. key_version always 1.
+ * Per-group PSK management. Each group has its own 32-byte AES-256 key
+ * stored at ~/.cordelia/group-keys/{groupId}.key.
  *
- * R3 target: per-group keys, member key escrow, rotation with re-encryption.
+ * GroupKeyVault delegates to group-keys.ts for filesystem I/O.
+ * Rotation and re-encryption are stubs until E4 (key lifecycle sprint).
  */
+
+import { getGroupKey, storeGroupKey } from './group-keys.js';
 
 export interface KeyVault {
   getGroupKey(groupId: string, version?: number): Promise<Buffer>;
@@ -14,28 +17,25 @@ export interface KeyVault {
 }
 
 /**
- * R2 degenerate stub. Single shared key, no rotation, no re-encryption.
- * Satisfies the interface contract so R3 can swap in a real implementation.
+ * Real per-group key vault backed by filesystem PSKs.
+ * Each group's key lives at ~/.cordelia/group-keys/{groupId}.key (32 raw bytes).
  */
-export class SharedKeyVault implements KeyVault {
-  private readonly masterKey: Buffer;
-
-  constructor(masterKey?: Buffer) {
-    // Use provided key or a deterministic dummy for R2
-    this.masterKey = masterKey || Buffer.alloc(32, 0x01);
-  }
-
-  async getGroupKey(_groupId: string, _version?: number): Promise<Buffer> {
-    return this.masterKey;
+export class GroupKeyVault implements KeyVault {
+  async getGroupKey(groupId: string, _version?: number): Promise<Buffer> {
+    const key = await getGroupKey(groupId);
+    if (!key) {
+      throw new Error(`No PSK available for group ${groupId}`);
+    }
+    return key;
   }
 
   async rotateGroupKey(_groupId: string): Promise<{ newVersion: number }> {
-    // No-op in R2 -- single key, no rotation
+    // Stub until E4 -- single version per group for now
     return { newVersion: 1 };
   }
 
   async reencryptItems(_groupId: string, _fromVersion: number): Promise<{ count: number }> {
-    // No-op in R2 -- nothing to re-encrypt
+    // Stub until E4 -- nothing to re-encrypt yet
     return { count: 0 };
   }
 }
@@ -45,7 +45,7 @@ let activeVault: KeyVault | null = null;
 
 export function getKeyVault(): KeyVault {
   if (!activeVault) {
-    activeVault = new SharedKeyVault();
+    activeVault = new GroupKeyVault();
   }
   return activeVault;
 }

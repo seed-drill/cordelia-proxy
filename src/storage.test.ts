@@ -8,6 +8,7 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
+import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -1245,20 +1246,22 @@ describe('L2 shareItem', () => {
     await provider.addMember('share-grp', 'owner-user', 'owner');
     await provider.addMember('share-grp', 'other-user', 'member');
 
+    // Provision a group PSK for share-grp (required for COW re-encryption)
+    const { storeGroupKey, clearGroupKeyCache } = await import('./group-keys.js');
+    clearGroupKeyCache();
+    await storeGroupKey('share-grp', crypto.randomBytes(32));
+
     const l2 = await import('./l2.js');
 
-    // Write a private item
-    const writeResult = await l2.writeItem('learning', {
-      type: 'insight',
-      content: 'Shareable insight',
-      tags: ['share-test'],
-      confidence: 0.8,
+    // Write item directly to storage (bypassing writeItem which auto-assigns personal group)
+    const itemId = `share-test-${Date.now()}`;
+    const itemData = JSON.stringify({ type: 'insight', content: 'Shareable insight', tags: ['share-test'], confidence: 0.8 });
+    await provider.writeL2Item(itemId, 'learning', Buffer.from(itemData), {
+      type: 'learning',
+      owner_id: 'owner-user',
+      visibility: 'private',
     });
-    assert.ok('success' in writeResult && writeResult.success);
-    const itemId = (writeResult as { success: true; id: string }).id;
-
-    // Set owner_id on the item
-    provider.getDatabase().prepare('UPDATE l2_items SET owner_id = ? WHERE id = ?').run('owner-user', itemId);
+    await provider.ftsUpsert(itemId, 'Shareable insight', 'Shareable insight share-test', 'share-test');
 
     // Share it
     const shareResult = await l2.shareItem(itemId, 'share-grp', 'owner-user');

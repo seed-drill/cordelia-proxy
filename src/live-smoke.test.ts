@@ -12,7 +12,6 @@
  */
 
 import { initStorageProvider, getStorageProvider } from './storage.js';
-import { getConfig as getCryptoConfig, loadOrCreateSalt, initCrypto } from './crypto.js';
 import * as l2 from './l2.js';
 import type { SqliteStorageProvider } from './storage-sqlite.js';
 
@@ -51,16 +50,7 @@ async function run() {
 
   await initStorageProvider(memRoot);
 
-  // Init encryption if key available
-  const passphrase = process.env.CORDELIA_ENCRYPTION_KEY;
-  if (passphrase) {
-    const config = getCryptoConfig(memRoot);
-    const salt = await loadOrCreateSalt(config.saltDir, 'global');
-    await initCrypto(passphrase, salt);
-    console.log('Encryption: enabled');
-  } else {
-    console.log('Encryption: disabled — reads of encrypted items will fail');
-  }
+  // Encryption now uses per-group PSKs via group-keys.ts (no scrypt init needed)
 
   const storage = getStorageProvider();
   const sqliteStorage = storage as SqliteStorageProvider;

@@ -127,12 +127,7 @@ async function loadHotContext(
     let parsed = JSON.parse(buffer.toString('utf-8'));
 
     if (isEncryptedPayload(parsed)) {
-      const cryptoProvider = getDefaultCryptoProvider();
-      if (!cryptoProvider.isUnlocked()) {
-        throw new Error('Cannot read encrypted L1 context: encryption not configured');
-      }
-      const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
-      parsed = JSON.parse(decrypted.toString('utf-8'));
+      throw new Error('Legacy scrypt-encrypted L1 context found. Run migrate:v2 to convert.');
     }
 
     if (skipValidation) {
@@ -248,16 +243,7 @@ async function writeHotContext(
     newContext as unknown as Record<string, unknown>
   );
 
-  const cryptoProvider = getDefaultCryptoProvider();
-  let fileContent: string;
-
-  if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
-    const plaintext = Buffer.from(JSON.stringify(newContext, null, 2), 'utf-8');
-    const encrypted = await cryptoProvider.encrypt(plaintext);
-    fileContent = JSON.stringify(encrypted, null, 2);
-  } else {
-    fileContent = JSON.stringify(newContext, null, 2);
-  }
+  const fileContent = JSON.stringify(newContext, null, 2);
 
   const storage = getStorageProvider();
   await storage.writeL1(userId, Buffer.from(fileContent, 'utf-8'));
