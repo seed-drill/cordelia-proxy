@@ -199,7 +199,6 @@ user_id = "test"
       }
       env.HOME = path.join(tmpDir, 'nonexistent');
       env.CORDELIA_MEMORY_ROOT = memoryRoot;
-      delete env.CORDELIA_ENCRYPTION_KEY;
 
       try {
         execFileSync('node', [path.join(HOOKS_DIR, 'session-start.mjs')], {

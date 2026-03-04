@@ -9,7 +9,7 @@
  * and one group without. Writes test items, verifies TTL assignment,
  * then cleans up.
  *
- * Usage: CORDELIA_MEMORY_ROOT=/path CORDELIA_ENCRYPTION_KEY=... node --import tsx src/group-lifecycle-smoke.ts
+ * Usage: CORDELIA_MEMORY_ROOT=/path node --import tsx src/group-lifecycle-smoke.ts
  */
 
 import * as path from 'path';

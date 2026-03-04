@@ -15,7 +15,6 @@
     "test:crypto": "node --import tsx --test src/crypto.test.ts",
     "test:http": "node --import tsx --test src/http-server.test.ts",
     "test:health": "node scripts/check-memory-health.mjs",
-    "migrate": "node --import tsx src/migrate.ts",
     "migrate:v2": "node --import tsx src/migrate-v1-to-v2.ts",
     "rebuild-index": "node --import tsx src/rebuild-index.ts",
     "lint": "eslint .",

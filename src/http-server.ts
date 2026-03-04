@@ -449,7 +449,6 @@ app.get('/api/env', (_req: Request, res: Response) => {
     CORDELIA_STORAGE: process.env.CORDELIA_STORAGE,
     CORDELIA_CORE_API: CORDELIA_CORE_API,
     CORDELIA_NODE_TOKEN: mask(process.env.CORDELIA_NODE_TOKEN),
-    CORDELIA_ENCRYPTION_KEY: mask(process.env.CORDELIA_ENCRYPTION_KEY),
     CORDELIA_SESSION_SECRET: mask(process.env.CORDELIA_SESSION_SECRET),
     CORDELIA_BASE_URL: process.env.CORDELIA_BASE_URL,
     CORDELIA_LOCAL_USERS: LOCAL_USERS.size > 0 ? `${LOCAL_USERS.size} user(s)` : undefined,

@@ -7,8 +7,7 @@
  *
  * Run: npx tsx src/live-smoke.test.ts
  *
- * Expects CORDELIA_STORAGE, CORDELIA_MEMORY_ROOT, and
- * CORDELIA_ENCRYPTION_KEY to be set in the environment.
+ * Expects CORDELIA_STORAGE and CORDELIA_MEMORY_ROOT to be set.
  */
 
 import { initStorageProvider, getStorageProvider } from './storage.js';
