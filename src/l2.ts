@@ -678,7 +678,10 @@ async function decryptPayload(
   const itemMeta = await storage.readL2ItemMeta(id);
   if (itemMeta?.group_id) {
     const { getGroupKey, groupDecrypt } = await import('./group-keys.js');
-    const groupKey = await getGroupKey(itemMeta.group_id, itemMeta.key_version ?? undefined);
+    // key_version in meta = encryption scheme (1=scrypt, 2=group-psk), NOT key ring version.
+    // The key ring version is embedded in the encrypted payload itself (data.version).
+    const ringVersion = (parsed as { version?: number }).version ?? undefined;
+    const groupKey = await getGroupKey(itemMeta.group_id, ringVersion);
     if (groupKey) {
       const decrypted = await groupDecrypt(parsed as EncryptedPayload, groupKey);
       return JSON.parse(decrypted.toString('utf-8'));
