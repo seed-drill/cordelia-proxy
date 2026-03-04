@@ -1172,6 +1172,61 @@ app.get('/api/l2/search', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * GET /api/l2/catalog - Metadata-only catalog (no decryption needed)
+ *
+ * Returns item headers + group info from the node without touching encrypted
+ * payloads. Used by the portal when PSKs are unavailable (keeper/remote).
+ */
+app.get('/api/l2/catalog', async (_req: Request, res: Response) => {
+  try {
+    const { resolveNodeConfig } = await import('./storage.js');
+    const { NodeClient } = await import('./node-client.js');
+    const { url, token } = await resolveNodeConfig();
+    const client = new NodeClient({ baseUrl: url, token, timeoutMs: 10_000 });
+
+    const groups = await client.listGroups();
+    const groupMap = new Map(groups.map(g => [g.id, g.name ?? g.id]));
+
+    const allItems: Array<Record<string, unknown>> = [];
+    const byGroup: Record<string, number> = {};
+    let entities = 0, sessions = 0, learnings = 0;
+
+    for (const group of groups) {
+      if (group.culture === '__deleted__') continue;
+      const headers = await client.listGroupItems(group.id, undefined, 500);
+      byGroup[group.id] = headers.length;
+      for (const h of headers) {
+        const t = h.item_type ?? 'unknown';
+        if (t === 'entity') entities++;
+        else if (t === 'session') sessions++;
+        else if (t === 'learning') learnings++;
+        allItems.push({
+          id: h.item_id,
+          item_type: t,
+          group_id: group.id,
+          group_name: groupMap.get(group.id) ?? group.id,
+          author_id: h.author_id ?? null,
+          updated_at: h.updated_at ?? null,
+          checksum: h.checksum ?? null,
+          encrypted: true,
+        });
+      }
+    }
+
+    const total = allItems.length;
+    res.json({
+      groups: groups
+        .filter(g => g.culture !== '__deleted__')
+        .map(g => ({ id: g.id, name: g.name, culture: g.culture, item_count: byGroup[g.id] ?? 0 })),
+      items: allItems,
+      stats: { total, entities, sessions, learnings, by_group: byGroup },
+    });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 // =============================================================================
 // Group Management Routes
 // =============================================================================
