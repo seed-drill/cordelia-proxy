@@ -4,10 +4,11 @@
  * Implements StorageProvider by delegating L1/L2/group operations to
  * the cordelia-node Rust HTTP API (localhost:9473).
  *
- * Local-only operations (FTS indexing, vec search, embeddings, backup,
- * audit) stay on the local SQLite provider as fallback.
+ * Local SQLite is used ONLY for proxy-side concerns: FTS indexing,
+ * vec search, embeddings, backup, audit, and domain/TTL queries.
  *
- * FR-PRX-006: Falls back to local SQLite if node is unreachable.
+ * L1/L2/group operations fail fast if the node is unreachable.
+ * No silent SQLite fallback -- callers see the error immediately.
  */
 
 import type {
@@ -40,14 +41,17 @@ export class NodeStorageProvider implements StorageProvider {
   private readonly _memoryRoot: string;
 
   async initialize(): Promise<void> {
-    // Initialize local SQLite as fallback for local-only ops and when node is down
+    // Initialize local SQLite for proxy-side concerns (FTS, vec, embeddings, backup)
     const { SqliteStorageProvider } = await import('./storage-sqlite.js');
     this.local = new SqliteStorageProvider(this._memoryRoot);
     await this.local.initialize();
 
-    // Initial health check
+    // Verify node is reachable at startup
     this._nodeAvailable = await this.client.isAvailable();
     this._lastHealthCheck = Date.now();
+    if (!this._nodeAvailable) {
+      console.warn('[storage-node] Node unreachable at startup -- L1/L2/group ops will fail until node is available');
+    }
   }
 
   async close(): Promise<void> {
@@ -67,8 +71,11 @@ export class NodeStorageProvider implements StorageProvider {
     return this._nodeAvailable;
   }
 
-  private async useNode(): Promise<boolean> {
-    return this.nodeAvailable();
+  /** Throw if node is unreachable. Used for L1/L2/group ops that must not silently fallback. */
+  private async requireNode(): Promise<void> {
+    if (!(await this.nodeAvailable())) {
+      throw new Error('Cordelia node is unreachable. L1/L2/group operations require a running node.');
+    }
   }
 
   // ====================================================================
@@ -76,58 +83,47 @@ export class NodeStorageProvider implements StorageProvider {
   // ====================================================================
 
   async readL1(userId: string): Promise<Buffer | null> {
-    if (await this.useNode()) {
-      try {
-        const data = await this.client.readL1(userId);
-        if (data === null) return null;
-        return Buffer.from(JSON.stringify(data));
-      } catch (e) {
-        if (e instanceof NodeClientError && e.status === 404) return null;
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      const data = await this.client.readL1(userId);
+      if (data === null) return null;
+      return Buffer.from(JSON.stringify(data));
+    } catch (e) {
+      if (e instanceof NodeClientError && e.status === 404) return null;
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.readL1(userId);
   }
 
   async writeL1(userId: string, data: Buffer): Promise<void> {
-    if (await this.useNode()) {
-      try {
-        const parsed = JSON.parse(data.toString('utf-8'));
-        await this.client.writeL1(userId, parsed);
-        return;
-      } catch (e) {
-        if (!(e instanceof SyntaxError)) this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    const parsed = JSON.parse(data.toString('utf-8'));
+    try {
+      await this.client.writeL1(userId, parsed);
+    } catch (e) {
+      if (!(e instanceof SyntaxError)) this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.writeL1(userId, data);
   }
 
   async deleteL1(userId: string): Promise<boolean> {
-    if (await this.useNode()) {
-      try {
-        return await this.client.deleteL1(userId);
-      } catch (e) {
-        // Only fall back to local on connection errors (status 0 = unreachable).
-        // If the node responded with an error, propagate it.
-        if (e instanceof NodeClientError && e.status === 0) {
-          this._nodeAvailable = false;
-        } else {
-          throw e;
-        }
-      }
+    await this.requireNode();
+    try {
+      return await this.client.deleteL1(userId);
+    } catch (e) {
+      if (e instanceof NodeClientError && e.status === 0) this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.deleteL1(userId);
   }
 
   async listL1Users(): Promise<string[]> {
-    if (await this.useNode()) {
-      try {
-        return await this.client.listL1Users();
-      } catch {
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      return await this.client.listL1Users();
+    } catch (e) {
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.listL1Users();
   }
 
   // ====================================================================
@@ -135,54 +131,50 @@ export class NodeStorageProvider implements StorageProvider {
   // ====================================================================
 
   async readL2Item(id: string): Promise<{ data: Buffer; type: string } | null> {
-    if (await this.useNode()) {
-      try {
-        const res = await this.client.readL2Item(id);
-        if (!res) return null;
-        return {
-          data: Buffer.from(JSON.stringify(res.data)),
-          type: res.type,
-        };
-      } catch (e) {
-        if (e instanceof NodeClientError && e.status === 404) return null;
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      const res = await this.client.readL2Item(id);
+      if (!res) return null;
+      return {
+        data: Buffer.from(JSON.stringify(res.data)),
+        type: res.type,
+      };
+    } catch (e) {
+      if (e instanceof NodeClientError && e.status === 404) return null;
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.readL2Item(id);
   }
 
   async writeL2Item(id: string, type: string, data: Buffer, meta: L2ItemMeta): Promise<void> {
-    if (await this.useNode()) {
-      try {
-        const parsed = JSON.parse(data.toString('utf-8'));
-        await this.client.writeL2Item(id, type, parsed, {
-          owner_id: meta.owner_id,
-          visibility: meta.visibility,
-          group_id: meta.group_id,
-          author_id: meta.author_id,
-          key_version: meta.key_version,
-          parent_id: meta.parent_id,
-          is_copy: meta.is_copy,
-          domain: meta.domain,
-          ttl_expires_at: meta.ttl_expires_at,
-        });
-        return;
-      } catch (e) {
-        if (!(e instanceof SyntaxError)) this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    const parsed = JSON.parse(data.toString('utf-8'));
+    try {
+      await this.client.writeL2Item(id, type, parsed, {
+        owner_id: meta.owner_id,
+        visibility: meta.visibility,
+        group_id: meta.group_id,
+        author_id: meta.author_id,
+        key_version: meta.key_version,
+        parent_id: meta.parent_id,
+        is_copy: meta.is_copy,
+        domain: meta.domain,
+        ttl_expires_at: meta.ttl_expires_at,
+      });
+    } catch (e) {
+      if (!(e instanceof SyntaxError)) this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.writeL2Item(id, type, data, meta);
   }
 
   async deleteL2Item(id: string): Promise<boolean> {
-    if (await this.useNode()) {
-      try {
-        return await this.client.deleteL2Item(id);
-      } catch {
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      return await this.client.deleteL2Item(id);
+    } catch (e) {
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.deleteL2Item(id);
   }
 
   // ====================================================================
@@ -267,125 +259,114 @@ export class NodeStorageProvider implements StorageProvider {
   // ====================================================================
 
   async createGroup(id: string, name: string, culture: string, securityPolicy: string): Promise<void> {
-    if (await this.useNode()) {
-      try {
-        await this.client.createGroup(id, name, culture, securityPolicy);
-        return;
-      } catch {
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      await this.client.createGroup(id, name, culture, securityPolicy);
+    } catch (e) {
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.createGroup(id, name, culture, securityPolicy);
   }
 
   async readGroup(id: string): Promise<GroupRow | null> {
-    if (await this.useNode()) {
-      try {
-        const res = await this.client.readGroup(id);
-        if (!res) return null;
-        return res.group as GroupRow;
-      } catch (e) {
-        if (e instanceof NodeClientError && e.status === 404) return null;
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      const res = await this.client.readGroup(id);
+      if (!res) return null;
+      return res.group as GroupRow;
+    } catch (e) {
+      if (e instanceof NodeClientError && e.status === 404) return null;
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.readGroup(id);
   }
 
   async listGroups(): Promise<GroupRow[]> {
-    if (await this.useNode()) {
-      try {
-        return (await this.client.listGroups()) as GroupRow[];
-      } catch {
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      return (await this.client.listGroups()) as GroupRow[];
+    } catch (e) {
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.listGroups();
   }
 
   async deleteGroup(id: string): Promise<boolean> {
-    if (await this.useNode()) {
-      try {
-        return await this.client.deleteGroup(id);
-      } catch {
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      return await this.client.deleteGroup(id);
+    } catch (e) {
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.deleteGroup(id);
   }
 
   async addMember(groupId: string, entityId: string, role: string): Promise<void> {
-    if (await this.useNode()) {
-      try {
-        await this.client.addMember(groupId, entityId, role);
-        return;
-      } catch {
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      await this.client.addMember(groupId, entityId, role);
+    } catch (e) {
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.addMember(groupId, entityId, role);
   }
 
   async removeMember(groupId: string, entityId: string): Promise<boolean> {
-    if (await this.useNode()) {
-      try {
-        return await this.client.removeMember(groupId, entityId);
-      } catch {
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      return await this.client.removeMember(groupId, entityId);
+    } catch (e) {
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.removeMember(groupId, entityId);
   }
 
   async listMembers(groupId: string): Promise<GroupMemberRow[]> {
-    if (await this.useNode()) {
-      try {
-        const res = await this.client.readGroup(groupId);
-        if (!res) return [];
-        return res.members.map((m: GroupMemberInfo) => ({
-          group_id: m.group_id,
-          entity_id: m.entity_id,
-          role: m.role as GroupMemberRow['role'],
-          posture: (m.posture ?? 'active') as GroupMemberRow['posture'],
-          joined_at: m.joined_at,
-        }));
-      } catch {
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      const res = await this.client.readGroup(groupId);
+      if (!res) return [];
+      return res.members.map((m: GroupMemberInfo) => ({
+        group_id: m.group_id,
+        entity_id: m.entity_id,
+        role: m.role as GroupMemberRow['role'],
+        posture: (m.posture ?? 'active') as GroupMemberRow['posture'],
+        joined_at: m.joined_at,
+      }));
+    } catch (e) {
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.listMembers(groupId);
   }
 
   async getMembership(groupId: string, entityId: string): Promise<GroupMemberRow | null> {
-    if (await this.useNode()) {
-      try {
-        const res = await this.client.readGroup(groupId);
-        if (!res) return null;
-        const member = res.members.find((m: GroupMemberInfo) => m.entity_id === entityId);
-        if (!member) return null;
-        return {
-          group_id: member.group_id,
-          entity_id: member.entity_id,
-          role: member.role as GroupMemberRow['role'],
-          posture: (member.posture ?? 'active') as GroupMemberRow['posture'],
-          joined_at: member.joined_at,
-        };
-      } catch {
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      const res = await this.client.readGroup(groupId);
+      if (!res) return null;
+      const member = res.members.find((m: GroupMemberInfo) => m.entity_id === entityId);
+      if (!member) return null;
+      return {
+        group_id: member.group_id,
+        entity_id: member.entity_id,
+        role: member.role as GroupMemberRow['role'],
+        posture: (member.posture ?? 'active') as GroupMemberRow['posture'],
+        joined_at: member.joined_at,
+      };
+    } catch (e) {
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.getMembership(groupId, entityId);
   }
 
   async updateMemberPosture(groupId: string, entityId: string, posture: string): Promise<boolean> {
-    if (await this.useNode()) {
-      try {
-        return await this.client.updateMemberPosture(groupId, entityId, posture);
-      } catch {
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      return await this.client.updateMemberPosture(groupId, entityId, posture);
+    } catch (e) {
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.updateMemberPosture(groupId, entityId, posture);
   }
 
   async logAccess(entry: AccessLogEntry): Promise<void> {
@@ -409,27 +390,26 @@ export class NodeStorageProvider implements StorageProvider {
     domain: string | null;
     ttl_expires_at: string | null;
   } | null> {
-    if (await this.useNode()) {
-      try {
-        const res = await this.client.readL2Item(id);
-        if (!res) return null;
-        return {
-          owner_id: res.meta.owner_id,
-          visibility: res.meta.visibility,
-          group_id: res.meta.group_id,
-          author_id: res.meta.author_id,
-          key_version: res.meta.key_version,
-          parent_id: res.meta.parent_id ?? null,
-          is_copy: res.meta.is_copy ? 1 : 0,
-          domain: res.meta.domain ?? null,
-          ttl_expires_at: res.meta.ttl_expires_at ?? null,
-        };
-      } catch (e) {
-        if (e instanceof NodeClientError && e.status === 404) return null;
-        this._nodeAvailable = false;
-      }
+    await this.requireNode();
+    try {
+      const res = await this.client.readL2Item(id);
+      if (!res) return null;
+      return {
+        owner_id: res.meta.owner_id,
+        visibility: res.meta.visibility,
+        group_id: res.meta.group_id,
+        author_id: res.meta.author_id,
+        key_version: res.meta.key_version,
+        parent_id: res.meta.parent_id ?? null,
+        is_copy: res.meta.is_copy ? 1 : 0,
+        domain: res.meta.domain ?? null,
+        ttl_expires_at: res.meta.ttl_expires_at ?? null,
+      };
+    } catch (e) {
+      if (e instanceof NodeClientError && e.status === 404) return null;
+      this._nodeAvailable = false;
+      throw e;
     }
-    return this.local.readL2ItemMeta(id);
   }
 
   // ====================================================================
