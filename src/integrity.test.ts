@@ -105,11 +105,12 @@ describe('verifyChainHash', () => {
 
     const previousHash = 'genesis';
     const sessionCount = 1;
+    const sessionStart = new Date().toISOString();
     const contentHashWithEphemeral = computeContentHash({
       ...l1Data,
       ephemeral: {
         session_count: sessionCount,
-        current_session_start: new Date().toISOString(),
+        current_session_start: sessionStart,
         last_session_end: null,
         last_summary: null,
         open_threads: [],
@@ -122,7 +123,7 @@ describe('verifyChainHash', () => {
       ...l1Data,
       ephemeral: {
         session_count: sessionCount,
-        current_session_start: new Date().toISOString(),
+        current_session_start: sessionStart,
         last_session_end: null,
         last_summary: null,
         open_threads: [],
