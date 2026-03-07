@@ -1,5 +1,10 @@
 # Key Management Architecture
 
+> **Note:** This document predates the E5 encryption migration (2026-03-03). The current
+> encryption model uses per-group PSKs with ECIES envelope distribution. See
+> `cordelia-core/docs/design/encryption-specification.md` for the authoritative spec.
+> An update to this document is planned (proxy#24).
+
 Cordelia uses a two-tier key management strategy that balances security with ease of onboarding.
 
 ## Two-Tier Strategy

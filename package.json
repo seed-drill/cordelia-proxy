@@ -1,7 +1,7 @@
 {
   "name": "cordelia",
   "version": "0.1.0",
-  "description": "Project Cordelia: Persistent dense memory system for Claude",
+  "description": "Encrypted memory proxy for AI agents -- MCP server, search, and HTTP API for the Cordelia network",
   "type": "module",
   "main": "dist/server.js",
   "bin": {

@@ -34,7 +34,7 @@ L2 items can be private (entity-only), group-scoped (membership-gated), or publi
 
 ### Security
 
-L2 items are encrypted at rest using AES-256-GCM with scrypt key derivation. Embeddings are stripped from the persisted index and regenerated on-demand to prevent semantic fingerprint leakage.
+L2 items are encrypted using AES-256-GCM with per-group Pre-Shared Keys (PSKs). Keys are distributed via ECIES envelope encryption (X25519 + HKDF-SHA256) during device enrollment. Legacy scrypt encryption was removed in E5. Embeddings are stripped from the persisted index and regenerated on-demand to prevent semantic fingerprint leakage.
 
 ## Installation
 
