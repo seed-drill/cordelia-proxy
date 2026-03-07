@@ -16,6 +16,8 @@ let server: Server;
 let API_BASE: string;
 let tmpDir: string;
 
+const TEST_API_KEY = 'ct_test_api_key_for_http_tests';
+
 // Test user data
 const testUsers = {
   minimal: {
@@ -62,9 +64,10 @@ const testUsers = {
 
 // Helper to make API requests
 async function apiRequest(endpoint: string, options: RequestInit = {}): Promise<{ status: number; data: any }> {
+  const mergedHeaders = { 'Content-Type': 'application/json', ...options.headers as Record<string, string> };
   const response = await fetch(`${API_BASE}${endpoint}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers as Record<string, string> },
     ...options,
+    headers: mergedHeaders,
   });
   const data = await response.json();
   return { status: response.status, data };
@@ -77,8 +80,9 @@ before(async () => {
   await fs.mkdir(path.join(tmpDir, 'L1-hot'), { recursive: true });
   await fs.mkdir(path.join(tmpDir, 'L2-warm', 'items'), { recursive: true });
 
-  // Use SQLite storage
+  // Use SQLite storage + enable bearer token auth for tests
   process.env.CORDELIA_STORAGE = 'sqlite';
+  process.env.CORDELIA_API_KEY = TEST_API_KEY;
 
   const { startServer } = await import('./http-server.js');
   server = await startServer({ port: 0, host: '127.0.0.1', memoryRoot: tmpDir });
@@ -297,5 +301,145 @@ describe('API Endpoints', () => {
         assert.strictEqual(result.type, 'entity');
       }
     });
+  });
+});
+
+describe('Bearer Token Auth', () => {
+  it('should reject POST /api/l2/item without auth', async () => {
+    const { status, data } = await apiRequest('/api/l2/item', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'learning', data: { type: 'insight', content: 'test' } }),
+    });
+    assert.strictEqual(status, 401);
+    assert.strictEqual(data.error, 'unauthorized');
+  });
+
+  it('should reject Bearer with wrong token', async () => {
+    const { status, data } = await apiRequest('/api/l2/item', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer wrong_token' },
+      body: JSON.stringify({ type: 'learning', data: { type: 'insight', content: 'test' } }),
+    });
+    assert.strictEqual(status, 401);
+    assert.strictEqual(data.error, 'unauthorized');
+  });
+
+  it('should accept Bearer with correct token', async () => {
+    const { status, data } = await apiRequest('/api/l2/item', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+      body: JSON.stringify({ type: 'learning', data: { type: 'insight', content: 'Bearer auth test' } }),
+    });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.success, true);
+    assert.ok(data.id);
+  });
+});
+
+describe('L2 Write Endpoint', () => {
+  let createdItemId: string;
+
+  it('POST /api/l2/item should create a learning', async () => {
+    const { status, data } = await apiRequest('/api/l2/item', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+      body: JSON.stringify({
+        type: 'learning',
+        data: { type: 'insight', content: 'Integration test learning' },
+      }),
+    });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.success, true);
+    assert.ok(data.id);
+    createdItemId = data.id;
+  });
+
+  it('POST /api/l2/item should create an entity', async () => {
+    const { status, data } = await apiRequest('/api/l2/item', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+      body: JSON.stringify({
+        type: 'entity',
+        data: { type: 'person', name: 'Test Person', summary: 'A test entity' },
+      }),
+    });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.success, true);
+    assert.ok(data.id);
+  });
+
+  it('POST /api/l2/item should reject missing type', async () => {
+    const { status, data } = await apiRequest('/api/l2/item', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+      body: JSON.stringify({ data: { content: 'no type' } }),
+    });
+    assert.strictEqual(status, 400);
+    assert.strictEqual(data.error, 'missing_fields');
+  });
+
+  it('POST /api/l2/item should reject missing data', async () => {
+    const { status, data } = await apiRequest('/api/l2/item', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+      body: JSON.stringify({ type: 'learning' }),
+    });
+    assert.strictEqual(status, 400);
+    assert.strictEqual(data.error, 'missing_fields');
+  });
+
+  it('GET /api/l2/item/:id should read back the created item', async () => {
+    assert.ok(createdItemId, 'createdItemId must be set from prior test');
+    const { status, data } = await apiRequest(`/api/l2/item/${createdItemId}`);
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.content, 'Integration test learning');
+  });
+});
+
+describe('L2 Delete Endpoint', () => {
+  let itemToDelete: string;
+
+  it('should create an item for deletion', async () => {
+    const { status, data } = await apiRequest('/api/l2/item', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+      body: JSON.stringify({
+        type: 'learning',
+        data: { type: 'pattern', content: 'Ephemeral item for delete test' },
+      }),
+    });
+    assert.strictEqual(status, 201);
+    itemToDelete = data.id;
+  });
+
+  it('DELETE /api/l2/item/:id should reject without auth', async () => {
+    const { status } = await apiRequest(`/api/l2/item/${itemToDelete}`, {
+      method: 'DELETE',
+    });
+    assert.strictEqual(status, 401);
+  });
+
+  it('DELETE /api/l2/item/:id should delete with auth', async () => {
+    const { status, data } = await apiRequest(`/api/l2/item/${itemToDelete}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+    });
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.success, true);
+    assert.strictEqual(data.id, itemToDelete);
+  });
+
+  it('GET /api/l2/item/:id should 404 after deletion', async () => {
+    const { status } = await apiRequest(`/api/l2/item/${itemToDelete}`);
+    assert.strictEqual(status, 404);
+  });
+
+  it('DELETE /api/l2/item/:id should 404 for non-existent item', async () => {
+    const { status, data } = await apiRequest('/api/l2/item/nonexistent-item-xyz', {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${TEST_API_KEY}` },
+    });
+    assert.strictEqual(status, 404);
+    assert.strictEqual(data.error, 'not_found');
   });
 });

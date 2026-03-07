@@ -224,6 +224,11 @@ export async function loadCredentialsBundle(): Promise<CredentialsBundle | null>
     process.env.CORDELIA_NODE_TOKEN = bundle.bearer_token;
   }
 
+  // Set API key for proxy bearer auth if not already set
+  if (bundle.bearer_token && !process.env.CORDELIA_API_KEY) {
+    process.env.CORDELIA_API_KEY = bundle.bearer_token;
+  }
+
   console.error(`Cordelia: loaded ${loaded} group key(s) from credentials bundle for ${bundle.entity_id}`);
   return bundle;
 }

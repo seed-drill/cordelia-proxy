@@ -64,8 +64,8 @@ if (LOCAL_USERS_RAW) {
   }
 }
 
-// API key for CLI uploads (optional, set via CORDELIA_API_KEY)
-const _API_KEY = process.env.CORDELIA_API_KEY;
+// API key for bearer token auth (optional, set via CORDELIA_API_KEY)
+const API_KEY = process.env.CORDELIA_API_KEY;
 
 // Core node API (optional, for P2P network status)
 const CORDELIA_CORE_API = process.env.CORDELIA_CORE_API;
@@ -194,21 +194,40 @@ async function findUserByGitHub(githubLogin: string): Promise<string | null> {
 }
 
 /**
- * Get session from cookie.
+ * Get session from cookie or Authorization: Bearer header.
+ * Bearer auth uses CORDELIA_API_KEY for agent/bot access.
  */
 function getSession(req: Request): Session | null {
+  // Check cookie-based session first
   const sessionId = req.signedCookies?.cordelia_session;
-  if (!sessionId) return null;
-
-  const session = sessions.get(sessionId);
-  if (!session) return null;
-
-  if (Date.now() > session.expires) {
-    sessions.delete(sessionId);
-    return null;
+  if (sessionId) {
+    const session = sessions.get(sessionId);
+    if (session) {
+      if (Date.now() > session.expires) {
+        sessions.delete(sessionId);
+      } else {
+        return session;
+      }
+    }
   }
 
-  return session;
+  // Fall back to Bearer token auth (agent accounts)
+  if (API_KEY) {
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ')) {
+      const token = authHeader.slice(7);
+      if (token === API_KEY) {
+        return {
+          auth_type: 'local',
+          username: 'agent',
+          cordelia_user: null,
+          expires: Date.now() + 3600_000,
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -1146,6 +1165,108 @@ app.get('/api/l2/item/:id', async (req: Request, res: Response) => {
     }
 
     res.json(item);
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * POST /api/l2/item - Create or update an L2 item
+ * Auth: session cookie, Bearer token, or LOCAL_MODE
+ * Body: { type: 'entity'|'session'|'learning', data: {...}, entity_id?, group_id?, domain? }
+ */
+app.post('/api/l2/item', async (req: Request, res: Response) => {
+  const session = getSession(req);
+  if (!LOCAL_MODE && !session) {
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+
+  try {
+    const { type, data, entity_id, group_id, domain } = req.body as {
+      type: 'entity' | 'session' | 'learning';
+      data: Record<string, unknown>;
+      entity_id?: string;
+      group_id?: string;
+      domain?: 'value' | 'procedural' | 'interrupt';
+    };
+
+    if (!type || !data) {
+      res.status(400).json({ error: 'missing_fields', detail: 'type and data are required' });
+      return;
+    }
+
+    // Group membership check (same as MCP tool)
+    if (entity_id && group_id) {
+      const storage = getStorageProvider();
+      const membership = await storage.getMembership(group_id, entity_id);
+      if (!membership) {
+        res.status(403).json({ error: 'unauthorized', detail: 'not a member of group' });
+        return;
+      }
+      if (membership.role === 'viewer') {
+        res.status(403).json({ error: 'unauthorized', detail: 'viewer cannot write' });
+        return;
+      }
+      if (membership.posture === 'emcon') {
+        res.status(403).json({ error: 'unauthorized', detail: 'EMCON posture blocks writes' });
+        return;
+      }
+    }
+
+    const result = await l2.writeItem(type, data, { group_id, entity_id, domain });
+    if ('error' in result) {
+      res.status(400).json(result);
+    } else {
+      res.status(201).json(result);
+    }
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * DELETE /api/l2/item/:id - Delete an L2 item
+ * Auth: session cookie, Bearer token, or LOCAL_MODE
+ * Query: entity_id (optional, for policy checks)
+ */
+app.delete('/api/l2/item/:id', async (req: Request, res: Response) => {
+  const session = getSession(req);
+  if (!LOCAL_MODE && !session) {
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+
+  try {
+    const id = req.params.id as string;
+    const entity_id = req.query.entity_id as string | undefined;
+
+    // Policy check (same as MCP tool)
+    if (entity_id) {
+      const storage = getStorageProvider();
+      const meta = await storage.readL2ItemMeta(id);
+      if (meta?.visibility === 'group' && meta.group_id) {
+        const membership = await storage.getMembership(meta.group_id, entity_id);
+        if (!membership) {
+          res.status(403).json({ error: 'unauthorized', detail: 'not a member of group' });
+          return;
+        }
+        if (membership.role !== 'owner' && membership.role !== 'admin' && meta.author_id !== entity_id) {
+          res.status(403).json({ error: 'unauthorized', detail: 'only owner/admin or author can delete group items' });
+          return;
+        }
+      } else if (meta?.visibility === 'private' && meta.owner_id && meta.owner_id !== entity_id) {
+        res.status(403).json({ error: 'unauthorized', detail: 'not owner of private item' });
+        return;
+      }
+    }
+
+    const result = await l2.deleteItem(id);
+    if ('error' in result) {
+      res.status(404).json(result);
+    } else {
+      res.json(result);
+    }
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
   }
