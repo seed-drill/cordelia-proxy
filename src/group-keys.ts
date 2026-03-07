@@ -232,3 +232,45 @@ export async function loadCredentialsBundle(): Promise<CredentialsBundle | null>
   console.error(`Cordelia: loaded ${loaded} group key(s) from credentials bundle for ${bundle.entity_id}`);
   return bundle;
 }
+
+/**
+ * Encrypt L1 hot context using the personal group PSK.
+ * Returns the encrypted payload as a JSON object, or null if no PSK is available
+ * (in which case the caller should store plaintext -- graceful degradation).
+ */
+export async function encryptL1(plaintext: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  const { getPersonalGroup } = await import('./storage.js');
+  const personalGroupId = await getPersonalGroup();
+  if (!personalGroupId) return null;
+
+  const key = await getGroupKey(personalGroupId);
+  if (!key) return null;
+
+  const buf = Buffer.from(JSON.stringify(plaintext), 'utf-8');
+  return await groupEncrypt(buf, key);
+}
+
+/**
+ * Decrypt L1 hot context if it is an encrypted payload.
+ * Returns plaintext JSON object. If the input is not encrypted, returns it as-is
+ * (transparent migration: old plaintext data still works).
+ */
+export async function decryptL1(data: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (data._encrypted !== true || typeof data.iv !== 'string' || typeof data.ciphertext !== 'string') {
+    return data; // Not encrypted -- return as-is (migration compat)
+  }
+
+  const { getPersonalGroup } = await import('./storage.js');
+  const personalGroupId = await getPersonalGroup();
+  if (!personalGroupId) {
+    throw new Error('Cannot decrypt L1: no personal group configured');
+  }
+
+  const key = await getGroupKey(personalGroupId);
+  if (!key) {
+    throw new Error(`Cannot decrypt L1: no PSK for personal group ${personalGroupId}`);
+  }
+
+  const decrypted = await groupDecrypt(data as { iv: string; authTag: string; ciphertext: string }, key);
+  return JSON.parse(decrypted.toString('utf-8'));
+}

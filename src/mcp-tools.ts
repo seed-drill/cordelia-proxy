@@ -126,7 +126,9 @@ async function loadHotContext(
     const parsed = JSON.parse(buffer.toString('utf-8'));
 
     if (isEncryptedPayload(parsed)) {
-      throw new Error('Legacy scrypt-encrypted L1 context found. Run migrate:v2 to convert.');
+      // Node storage decrypts transparently in the storage provider.
+      // This only triggers for local SQLite with encrypted data (should not happen).
+      throw new Error('Encrypted L1 context in local storage. Use CORDELIA_STORAGE=node for encrypted L1.');
     }
 
     if (skipValidation) {

@@ -123,15 +123,12 @@ async function loadHotContext(userId: string): Promise<L1HotContext | null> {
       return null;
     }
 
-    let parsed = JSON.parse(buffer.toString('utf-8'));
+    const parsed = JSON.parse(buffer.toString('utf-8'));
 
     if (isEncryptedPayload(parsed)) {
-      const cryptoProvider = getDefaultCryptoProvider();
-      if (!cryptoProvider.isUnlocked()) {
-        throw new Error('Cannot read encrypted L1 context: encryption not configured');
-      }
-      const decrypted = await cryptoProvider.decrypt(parsed as EncryptedPayload);
-      parsed = JSON.parse(decrypted.toString('utf-8'));
+      // Node storage decrypts transparently in the storage provider.
+      // This only triggers for local SQLite with encrypted data (should not happen).
+      throw new Error('Encrypted L1 context in local storage. Use CORDELIA_STORAGE=node for encrypted L1.');
     }
 
     return L1HotContextSchema.parse(parsed);
@@ -1116,18 +1113,9 @@ app.put('/api/hot/:userId', async (req: Request, res: Response) => {
     // Validate the incoming context
     const validated = L1HotContextSchema.parse(req.body);
 
-    // Encrypt if crypto is enabled
-    const cryptoProvider = getDefaultCryptoProvider();
-    let fileContent: string;
-
-    if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
-      const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
-      const encrypted = await cryptoProvider.encrypt(plaintext);
-      fileContent = JSON.stringify(encrypted, null, 2);
-    } else {
-      fileContent = JSON.stringify(validated, null, 2);
-    }
-
+    // L1 encryption is handled transparently by the storage provider
+    // (NodeStorageProvider encrypts with personal group PSK before writing to node)
+    const fileContent = JSON.stringify(validated, null, 2);
     const storage = getStorageProvider();
     await storage.writeL1(userId, Buffer.from(fileContent, 'utf-8'));
 
@@ -1613,19 +1601,9 @@ app.post('/api/profile/:userId/api-key', async (req: Request, res: Response) => 
     context.identity.api_key = apiKey;
     context.updated_at = new Date().toISOString();
 
-    // Validate and save
+    // Validate and save (encryption handled transparently by storage provider)
     const validated = L1HotContextSchema.parse(context);
-    const cryptoProvider = getDefaultCryptoProvider();
-    let fileContent: string;
-
-    if (cryptoProvider.isUnlocked() && cryptoProvider.name !== 'none') {
-      const plaintext = Buffer.from(JSON.stringify(validated, null, 2), 'utf-8');
-      const encrypted = await cryptoProvider.encrypt(plaintext);
-      fileContent = JSON.stringify(encrypted, null, 2);
-    } else {
-      fileContent = JSON.stringify(validated, null, 2);
-    }
-
+    const fileContent = JSON.stringify(validated, null, 2);
     await storage.writeL1(userId, Buffer.from(fileContent, 'utf-8'));
 
     res.json({ success: true, api_key: apiKey });

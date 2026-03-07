@@ -20,6 +20,7 @@ import type {
 } from './storage.js';
 import { NodeClient, NodeClientError } from './node-client.js';
 import type { GroupMemberInfo } from './node-client.js';
+import { encryptL1, decryptL1 } from './group-keys.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
 
@@ -87,7 +88,9 @@ export class NodeStorageProvider implements StorageProvider {
     try {
       const data = await this.client.readL1(userId);
       if (data === null) return null;
-      return Buffer.from(JSON.stringify(data));
+      // Decrypt if encrypted (transparent: plaintext data passes through unchanged)
+      const decrypted = await decryptL1(data as Record<string, unknown>);
+      return Buffer.from(JSON.stringify(decrypted));
     } catch (e) {
       if (e instanceof NodeClientError && e.status === 404) return null;
       this._nodeAvailable = false;
@@ -99,7 +102,9 @@ export class NodeStorageProvider implements StorageProvider {
     await this.requireNode();
     const parsed = JSON.parse(data.toString('utf-8'));
     try {
-      await this.client.writeL1(userId, parsed);
+      // Encrypt with personal group PSK before sending to node
+      const encrypted = await encryptL1(parsed);
+      await this.client.writeL1(userId, encrypted ?? parsed);
     } catch (e) {
       if (!(e instanceof SyntaxError)) this._nodeAvailable = false;
       throw e;
