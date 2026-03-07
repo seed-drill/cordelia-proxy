@@ -4,24 +4,48 @@
  *
  * Flow:
  * 1. Ensure local HTTP server sidecar is running
- * 2. Connect MCP client via SSE
- * 3. Read L1 via memory_read_hot
- * 4. Increment session_count
- * 5. Set last_session_end timestamp
- * 6. Generate auto-summary from L1 state (R2-015)
- * 7. Compute new chain_hash
- * 8. Write back via memory_write_hot
- *
- * Usage: CORDELIA_ENCRYPTION_KEY="..." node session-end.mjs [user_id]
+ * 2. Read L1 via REST API (GET /api/hot/:userId)
+ * 3. Increment session_count
+ * 4. Set last_session_end timestamp
+ * 5. Generate auto-summary from L1 state (R2-015)
+ * 6. Compute new chain_hash
+ * 7. Write back via REST API (PUT /api/hot/:userId)
  */
 import * as crypto from 'crypto';
 import {
-  getEncryptionKey, getMemoryRoot,
+  getMemoryRoot,
   computeContentHash, computeChainHash, getUserId,
 } from './lib.mjs';
 import { ensureServer } from './server-manager.mjs';
-import { createMcpClient, readL1, writeL1 } from './mcp-client.mjs';
 import { notify } from './recovery.mjs';
+
+let BASE_URL;
+
+/**
+ * Read L1 via REST API.
+ */
+async function readL1(userId) {
+  const res = await fetch(`${BASE_URL}/api/hot/${userId}`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (data.error) return null;
+  return data;
+}
+
+/**
+ * Write L1 via REST API.
+ */
+async function writeL1(userId, data) {
+  const res = await fetch(`${BASE_URL}/api/hot/${userId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    signal: AbortSignal.timeout(5000),
+  });
+  return await res.json();
+}
 
 /**
  * Generate a concise session summary from L1 state.
@@ -70,24 +94,12 @@ async function main() {
     process.exit(1);
   }
 
-  const passphrase = await getEncryptionKey();
-
-  if (!passphrase) {
-    console.error('Warning: CORDELIA_ENCRYPTION_KEY not found in env or .mcp.json - skipping session end');
-    process.exit(0);
-  }
-
-  let client;
   try {
-    // Ensure HTTP server sidecar is running
     const memoryRoot = await getMemoryRoot();
-    const { baseUrl } = await ensureServer(passphrase, memoryRoot);
+    const { baseUrl } = await ensureServer(memoryRoot);
+    BASE_URL = baseUrl;
 
-    // Connect MCP client
-    client = await createMcpClient(baseUrl);
-
-    // Read L1 via MCP
-    const l1Data = await readL1(client, userId);
+    const l1Data = await readL1(userId);
 
     if (!l1Data) {
       console.error(`[Cordelia] No L1 context for user: ${userId} - skipping session end`);
@@ -144,8 +156,8 @@ async function main() {
       console.error(`[Cordelia] WARNING: L1 size ${Math.round(l1Size / 1024)}KB exceeds 50KB target.`);
     }
 
-    // Write back via MCP
-    const writeResult = await writeL1(client, userId, 'replace', l1Data);
+    // Write back via REST API
+    const writeResult = await writeL1(userId, l1Data);
     if (writeResult?.error) {
       console.error(`[Cordelia] Write error: ${writeResult.error}`);
       process.exit(1);
@@ -155,10 +167,6 @@ async function main() {
     notify('Cordelia: SESSION-END ERROR', error.message);
     console.error(`[Cordelia] Session end error: ${error.message}`);
     process.exit(1);
-  } finally {
-    if (client) {
-      try { await client.close(); } catch { /* ignore */ }
-    }
   }
 }
 

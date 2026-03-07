@@ -4,24 +4,48 @@
  *
  * Flow:
  * 1. Ensure local HTTP server sidecar is running
- * 2. Connect MCP client via SSE
- * 3. Read L1 context via memory_read_hot
- * 4. Verify integrity chain (recompute hash, compare to stored)
- * 5. Update current_session_start
- * 6. Write back via memory_write_hot
- * 7. Output context + verification status to stdout
- *
- * Usage: CORDELIA_ENCRYPTION_KEY="..." node session-start.mjs [user_id]
+ * 2. Read L1 context via REST API (GET /api/hot/:userId)
+ * 3. Verify integrity chain (recompute hash, compare to stored)
+ * 4. Update current_session_start
+ * 5. Write back via REST API (PUT /api/hot/:userId)
+ * 6. Output context + verification status to stdout
  */
 import {
-  getEncryptionKey, getMemoryRoot,
+  getMemoryRoot,
   computeContentHash, computeChainHash, getUserId,
 } from './lib.mjs';
 import { ensureServer } from './server-manager.mjs';
-import { createMcpClient, readL1, writeL1 } from './mcp-client.mjs';
 import { notify } from './recovery.mjs';
 
 const REMOTE_URL = process.env.CORDELIA_REMOTE_URL || 'https://cordelia-seed-drill.fly.dev';
+
+let BASE_URL;
+
+/**
+ * Read L1 via REST API.
+ */
+async function readL1(userId) {
+  const res = await fetch(`${BASE_URL}/api/hot/${userId}`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (data.error) return null;
+  return data;
+}
+
+/**
+ * Write L1 via REST API.
+ */
+async function writeL1(userId, data) {
+  const res = await fetch(`${BASE_URL}/api/hot/${userId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    signal: AbortSignal.timeout(5000),
+  });
+  return await res.json();
+}
 
 /**
  * Check remote sync status
@@ -86,7 +110,7 @@ function verifyIntegrity(l1Data) {
   }
 
   const { integrity } = ephemeral;
-  const { chain_hash, previous_hash, genesis } = integrity;
+  const { chain_hash, previous_hash } = integrity;
 
   const contentHash = computeContentHash(l1Data);
   const expectedHash = computeChainHash(previous_hash, ephemeral.session_count, contentHash);
@@ -98,7 +122,7 @@ function verifyIntegrity(l1Data) {
     };
   }
 
-  const genesisDate = new Date(genesis);
+  const genesisDate = new Date(integrity.genesis);
   const now = new Date();
   const ageDays = Math.floor((now - genesisDate) / (1000 * 60 * 60 * 24));
 
@@ -114,7 +138,7 @@ function outputContextBlock(json) {
   console.log('=== END CORDELIA CONTEXT ===');
 }
 
-async function updateSessionStart(client, userId, l1Data) {
+async function updateSessionStart(userId, l1Data) {
   const now = new Date().toISOString();
   l1Data.ephemeral.current_session_start = now;
 
@@ -125,7 +149,7 @@ async function updateSessionStart(client, userId, l1Data) {
     contentHash
   );
 
-  const writeResult = await writeL1(client, userId, 'replace', l1Data, l1Data.updated_at);
+  const writeResult = await writeL1(userId, l1Data);
   if (writeResult?.error) {
     console.error(`[Cordelia] Write error: ${writeResult.error}`);
   }
@@ -204,23 +228,15 @@ async function main() {
     process.exit(1);
   }
 
-  const passphrase = await getEncryptionKey();
-
-  if (!passphrase) {
-    console.error('Warning: CORDELIA_ENCRYPTION_KEY not found in env or .mcp.json');
-    process.exit(0);
-  }
-
-  let client;
   try {
     const memoryRoot = await getMemoryRoot();
-    const { baseUrl, cold } = await ensureServer(passphrase, memoryRoot);
+    const { baseUrl, cold } = await ensureServer(memoryRoot);
+    BASE_URL = baseUrl;
     if (cold) {
       console.error('[Cordelia] Started HTTP server sidecar');
     }
 
-    client = await createMcpClient(baseUrl);
-    const l1Data = await readL1(client, userId);
+    const l1Data = await readL1(userId);
 
     if (!l1Data) {
       console.error(`[Cordelia] No L1 context found for user: ${userId}`);
@@ -231,7 +247,7 @@ async function main() {
     const integrity = verifyIntegrity(l1Data);
 
     if (integrity.valid && l1Data.ephemeral) {
-      await updateSessionStart(client, userId, l1Data);
+      await updateSessionStart(userId, l1Data);
     }
 
     const syncStatus = await checkSyncStatus(userId, l1Data);
@@ -253,10 +269,6 @@ async function main() {
     console.error(`[Cordelia] Unexpected error: ${error.message}`);
     outputContextBlock(`{"error": "${error.message}"}`);
     process.exit(0);
-  } finally {
-    if (client) {
-      try { await client.close(); } catch { /* ignore */ }
-    }
   }
 }
 

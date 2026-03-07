@@ -115,7 +115,7 @@ async function waitForNode(nodeUrl, nodeToken) {
  * Spawn the HTTP server as a detached background process.
  * Requires the local Cordelia node to be running.
  */
-async function spawnServer(passphrase, memoryRoot) {
+async function spawnServer(memoryRoot) {
   await fs.mkdir(CORDELIA_HOME, { recursive: true });
 
   // Find the http-server.js in the cordelia-proxy dist directory
@@ -147,9 +147,6 @@ async function spawnServer(passphrase, memoryRoot) {
     CORDELIA_CORE_API: nodeUrl,
     CORDELIA_NODE_TOKEN: nodeToken,
   };
-  if (passphrase) {
-    env.CORDELIA_ENCRYPTION_KEY = passphrase;
-  }
 
   const logMsg = `[${new Date().toISOString()}] Starting proxy: storage=node (${nodeUrl})\n`;
   await fs.appendFile(LOG_FILE, logMsg);
@@ -179,7 +176,7 @@ async function spawnServer(passphrase, memoryRoot) {
  *
  * Precondition: local Cordelia node must be running (launchd service).
  */
-export async function ensureServer(passphrase, memoryRoot) {
+export async function ensureServer(memoryRoot) {
   const port = DEFAULT_PORT;
   const baseUrl = getBaseUrl(port);
 
@@ -197,7 +194,7 @@ export async function ensureServer(passphrase, memoryRoot) {
   }
 
   // Spawn new server (requires node to be running)
-  const pid = await spawnServer(passphrase, memoryRoot);
+  const pid = await spawnServer(memoryRoot);
 
   // Poll for readiness
   const start = Date.now();

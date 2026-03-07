@@ -6,23 +6,51 @@
  * 1. Read transcript_path from stdin (provided by Claude Code)
  * 2. Parse JSONL transcript, extract last N user+assistant messages
  * 3. Run lightweight novelty analysis
- * 4. Connect MCP client, read/write L1 via memory_read_hot / memory_write_hot
+ * 4. Read L1 via REST API (GET /api/hot/:userId)
  * 5. Persist high-signal items to L1 (notes, blockers)
  * 6. Deduplicate against existing L1 content
+ * 7. Write back via REST API (PUT /api/hot/:userId)
  *
  * Timeout: 15s (target: <3s actual)
  * Fallback: Any failure exits 0 - never block compaction
  */
 import * as fs from 'fs/promises';
 import {
-  getEncryptionKey, getMemoryRoot,
+  getMemoryRoot,
   computeContentHash, computeChainHash, getUserId,
 } from './lib.mjs';
 import { ensureServer } from './server-manager.mjs';
-import { createMcpClient, readL1, writeL1 } from './mcp-client.mjs';
 import { analyzeMessages } from './novelty-lite.mjs';
 
 const MAX_MESSAGES = 20;
+
+let BASE_URL;
+
+/**
+ * Read L1 via REST API.
+ */
+async function readL1(userId) {
+  const res = await fetch(`${BASE_URL}/api/hot/${userId}`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (data.error) return null;
+  return data;
+}
+
+/**
+ * Write L1 via REST API.
+ */
+async function writeL1(userId, data) {
+  const res = await fetch(`${BASE_URL}/api/hot/${userId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    signal: AbortSignal.timeout(5000),
+  });
+  return await res.json();
+}
 
 /**
  * Read transcript path from stdin (Claude Code passes it as input).
@@ -140,7 +168,6 @@ async function main() {
     process.exit(0); // Never block compaction
   }
 
-  let client;
   try {
     // Read transcript path from stdin
     const stdinData = await readStdin();
@@ -177,19 +204,13 @@ async function main() {
       process.exit(0);
     }
 
-    // Ensure server and connect MCP client
-    const passphrase = await getEncryptionKey();
-    if (!passphrase) {
-      console.error('[Cordelia PreCompact] No encryption key, skipping');
-      process.exit(0);
-    }
-
+    // Ensure server is running
     const memoryRoot = await getMemoryRoot();
-    const { baseUrl } = await ensureServer(passphrase, memoryRoot);
-    client = await createMcpClient(baseUrl);
+    const { baseUrl } = await ensureServer(memoryRoot);
+    BASE_URL = baseUrl;
 
-    // Read L1 via MCP
-    const l1Data = await readL1(client, userId);
+    // Read L1 via REST API
+    const l1Data = await readL1(userId);
     if (!l1Data) {
       console.error('[Cordelia PreCompact] No L1 context, skipping');
       process.exit(0);
@@ -213,8 +234,8 @@ async function main() {
       );
     }
 
-    // Write back via MCP
-    const writeResult = await writeL1(client, userId, 'replace', l1Data, l1Data.updated_at);
+    // Write back via REST API
+    const writeResult = await writeL1(userId, l1Data);
     if (writeResult?.error) {
       console.error(`[Cordelia PreCompact] Write error: ${writeResult.error}`);
     }
@@ -226,10 +247,6 @@ async function main() {
     // Never block compaction
     console.error(`[Cordelia PreCompact] Error (non-fatal): ${error.message}`);
     process.exit(0);
-  } finally {
-    if (client) {
-      try { await client.close(); } catch { /* ignore */ }
-    }
   }
 }
 

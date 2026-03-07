@@ -3,84 +3,21 @@
  * Cordelia Hooks - Shared Library
  *
  * Common utilities for all Cordelia hooks.
- * L1 read/write is now via MCP client (mcp-client.mjs), not file I/O.
- * Crypto is handled server-side. This module retains: config, user ID,
- * memory root, chain hashing, and encryption key lookup.
+ * L1 read/write is via REST API (GET/PUT /api/hot/:userId).
+ * Encryption is handled transparently by the storage provider.
+ * This module retains: config, user ID, memory root, chain hashing.
  */
 import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import * as os from 'os';
-import { execSync } from 'node:child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // --- Constants ---
 
 export const CORDELIA_DIR = path.resolve(__dirname, '..');
-
-// --- Encryption Key ---
-
-/** Attempt to retrieve key from vault API. */
-async function getKeyFromVault() {
-  const vaultUrl = process.env.CORDELIA_VAULT_URL;
-  const apiToken = process.env.CORDELIA_API_TOKEN;
-  if (!vaultUrl || !apiToken) return null;
-
-  try {
-    const res = await fetch(`${vaultUrl}/api/key`, {
-      headers: { 'Authorization': `Bearer ${apiToken}` }
-    });
-    if (!res.ok) return null;
-    const { key } = await res.json();
-    return key || null;
-  } catch {
-    return null;
-  }
-}
-
-/** Attempt to retrieve key from platform keychain. */
-function getKeyFromKeychain() {
-  const cmds = {
-    darwin: 'security find-generic-password -a cordelia -s cordelia-encryption-key -w',
-    linux: 'secret-tool lookup service cordelia type encryption-key',
-  };
-  const cmd = cmds[os.platform()];
-  if (!cmd) return null;
-
-  try {
-    return execSync(cmd, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-/** Attempt to retrieve key from ~/.cordelia/key file. */
-async function getKeyFromFile() {
-  try {
-    const key = (await fs.readFile(path.join(os.homedir(), '.cordelia', 'key'), 'utf-8')).trim();
-    return key || null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Get encryption key using 4-tier priority chain:
- *   1. Vault API     -- if CORDELIA_VAULT_URL + CORDELIA_API_TOKEN configured
- *   2. Env var       -- CORDELIA_ENCRYPTION_KEY
- *   3. Keychain      -- macOS Keychain / Linux secret-tool (GNOME Keyring)
- *   4. File          -- ~/.cordelia/key (0600 permissions)
- *
- * Returns key string or null. Never throws.
- */
-export async function getEncryptionKey() {
-  return (await getKeyFromVault())
-    ?? process.env.CORDELIA_ENCRYPTION_KEY
-    ?? getKeyFromKeychain()
-    ?? (await getKeyFromFile());
-}
 
 // --- Content & Chain Hashing ---
 
