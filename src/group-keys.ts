@@ -148,3 +148,82 @@ export async function storeGroupKey(groupId: string, psk: Buffer, version?: numb
 export function clearGroupKeyCache(): void {
   ringCache.clear();
 }
+
+/**
+ * Credentials bundle format (downloaded from portal agent account).
+ */
+export interface CredentialsBundle {
+  entity_id: string;
+  bearer_token: string;
+  node_url?: string;
+  groups: Array<{
+    group_id: string;
+    name?: string;
+    psk: string; // hex-encoded 32-byte PSK
+  }>;
+}
+
+/**
+ * Load a credentials bundle from file or env var.
+ * Writes PSKs to ~/.cordelia/group-keys/ directory.
+ * Also sets CORDELIA_NODE_TOKEN if bearer_token is present and env is unset.
+ *
+ * Sources checked in order:
+ * 1. CORDELIA_CREDENTIALS_FILE env var (path to JSON file)
+ * 2. CORDELIA_CREDENTIALS env var (inline JSON)
+ *
+ * Returns the parsed bundle, or null if no credentials source found.
+ */
+export async function loadCredentialsBundle(): Promise<CredentialsBundle | null> {
+  let raw: string | undefined;
+
+  const credFile = process.env.CORDELIA_CREDENTIALS_FILE;
+  if (credFile) {
+    try {
+      raw = await fs.readFile(credFile, 'utf-8');
+    } catch (err) {
+      console.error(`Cordelia: failed to read credentials file ${credFile}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  if (!raw) {
+    raw = process.env.CORDELIA_CREDENTIALS;
+  }
+
+  if (!raw) return null;
+
+  let bundle: CredentialsBundle;
+  try {
+    bundle = JSON.parse(raw) as CredentialsBundle;
+  } catch (err) {
+    console.error(`Cordelia: failed to parse credentials bundle: ${(err as Error).message}`);
+    return null;
+  }
+
+  if (!bundle.entity_id || !bundle.groups || !Array.isArray(bundle.groups)) {
+    console.error('Cordelia: invalid credentials bundle (missing entity_id or groups)');
+    return null;
+  }
+
+  // Write PSKs to group-keys directory
+  let loaded = 0;
+  for (const group of bundle.groups) {
+    if (!group.group_id || !group.psk) continue;
+    const psk = Buffer.from(group.psk, 'hex');
+    if (psk.length !== 32) {
+      console.error(`Cordelia: skipping group ${group.group_id} -- PSK must be 32 bytes, got ${psk.length}`);
+      continue;
+    }
+    await storeGroupKey(group.group_id, psk, 1);
+    loaded++;
+  }
+
+  // Set node token from bundle if not already set
+  if (bundle.bearer_token && !process.env.CORDELIA_NODE_TOKEN) {
+    process.env.CORDELIA_NODE_TOKEN = bundle.bearer_token;
+  }
+
+  console.error(`Cordelia: loaded ${loaded} group key(s) from credentials bundle for ${bundle.entity_id}`);
+  return bundle;
+}

@@ -16,6 +16,7 @@ import { InlinePolicyEngine, setPolicyEngine } from './policy.js';
 import { periodicCheck } from './integrity.js';
 import { getDefaultProvider } from './embeddings.js';
 import * as l2 from './l2.js';
+import { loadCredentialsBundle } from './group-keys.js';
 
 const MEMORY_ROOT = process.env.CORDELIA_MEMORY_ROOT || path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'memory');
 
@@ -67,6 +68,9 @@ async function checkAndBackfillSqlite(sqliteProvider: SqliteStorageProvider): Pr
 }
 
 async function main(): Promise<void> {
+  // Load credentials bundle if present (agent account provisioning)
+  await loadCredentialsBundle();
+
   // Initialize storage provider
   const storageProvider = await initStorageProvider(MEMORY_ROOT);
   console.error(`Cordelia: Storage provider: ${storageProvider.name}`);

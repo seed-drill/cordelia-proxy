@@ -35,6 +35,7 @@ import {
   type EncryptedPayload,
 } from './crypto.js';
 import { initStorageProvider, getStorageProvider } from './storage.js';
+import { loadCredentialsBundle } from './group-keys.js';
 import { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -2176,6 +2177,9 @@ export async function startServer(opts?: { port?: number; host?: string; memoryR
   const port = opts?.port ?? PORT;
   const host = opts?.host ?? (process.env.CORDELIA_HTTP_HOST ?? (LOCAL_MODE ? '127.0.0.1' : (process.env.HOST ?? '0.0.0.0')));
   const memRoot = opts?.memoryRoot ?? MEMORY_ROOT;
+
+  // Load credentials bundle if present (agent account provisioning)
+  await loadCredentialsBundle();
 
   const storageProvider = await initStorageProvider(memRoot);
   console.log(`Cordelia HTTP: Storage provider: ${storageProvider.name}`);
