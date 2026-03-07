@@ -241,10 +241,16 @@ export async function loadCredentialsBundle(): Promise<CredentialsBundle | null>
 export async function encryptL1(plaintext: Record<string, unknown>): Promise<Record<string, unknown> | null> {
   const { getPersonalGroup } = await import('./storage.js');
   const personalGroupId = await getPersonalGroup();
-  if (!personalGroupId) return null;
+  if (!personalGroupId) {
+    console.error('Cordelia: no personal group configured, storing L1 unencrypted');
+    return null;
+  }
 
   const key = await getGroupKey(personalGroupId);
-  if (!key) return null;
+  if (!key) {
+    console.error(`Cordelia: no PSK for personal group ${personalGroupId}, storing L1 unencrypted`);
+    return null;
+  }
 
   const buf = Buffer.from(JSON.stringify(plaintext), 'utf-8');
   return await groupEncrypt(buf, key);
@@ -266,7 +272,9 @@ export async function decryptL1(data: Record<string, unknown>): Promise<Record<s
     throw new Error('Cannot decrypt L1: no personal group configured');
   }
 
-  const key = await getGroupKey(personalGroupId);
+  // Use key ring version from payload (same as L2 decryptPayload) to support key rotation
+  const ringVersion = typeof data.version === 'number' ? data.version : undefined;
+  const key = await getGroupKey(personalGroupId, ringVersion);
   if (!key) {
     throw new Error(`Cannot decrypt L1: no PSK for personal group ${personalGroupId}`);
   }
