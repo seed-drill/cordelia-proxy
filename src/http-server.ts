@@ -32,7 +32,6 @@ import { createSignupHandler, getGenesisHTML } from '@seed-drill/rutherford';
 import {
   getDefaultCryptoProvider,
   isEncryptedPayload,
-  type EncryptedPayload,
 } from './crypto.js';
 import { initStorageProvider, getStorageProvider } from './storage.js';
 import { loadCredentialsBundle } from './group-keys.js';
